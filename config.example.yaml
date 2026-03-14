@@ -1,0 +1,18 @@
+host: ""
+port: 8317
+
+# Directory to store OAuth tokens
+auth-dir: "~/.auth2api"
+
+# API keys for client authentication (clients use these to access this proxy)
+api-keys:
+  - "your-api-key-here"
+
+# Cloaking settings (masquerade as Claude Code CLI)
+cloaking:
+  mode: "auto"          # auto | always | never
+  strict-mode: false    # true = only billing header + agent block in system prompt
+  sensitive-words: []   # words to obfuscate with zero-width spaces
+  cache-user-id: false  # cache fake user ID per API key
+
+debug: false

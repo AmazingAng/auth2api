@@ -1,0 +1,26 @@
+{
+  "name": "auth2api",
+  "version": "1.0.0",
+  "description": "Lightweight Claude OAuth to OpenAI-compatible API proxy",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "login": "tsx src/index.ts --login",
+    "test:smoke": "tsx --test tests/smoke.test.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "js-yaml": "^4.1.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.14.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
