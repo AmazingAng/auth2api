@@ -78,6 +78,8 @@ auth-dir: "~/.auth2api"   # where OAuth tokens are stored
 api-keys:
   - "your-api-key-here"   # clients use this to authenticate
 
+body-limit: "200mb"       # maximum JSON request body size, useful for large-context usage
+
 cloaking:
   mode: "auto"            # auto | always | never
   strict-mode: false
@@ -97,6 +99,8 @@ timeouts:
 ```
 
 By default, streaming upstream requests are allowed to run for 10 minutes before auth2api aborts them.
+
+The default request body limit is `200mb`, which is more suitable for large Claude Code contexts than the previous fixed `20mb`.
 
 ## Usage
 

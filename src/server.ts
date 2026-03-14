@@ -48,7 +48,7 @@ cleanupTimer.unref();
 export function createServer(config: Config, manager: AccountManager): express.Application {
   const app = express();
 
-  app.use(express.json({ limit: "20mb" }));
+  app.use(express.json({ limit: config["body-limit"] }));
 
   // CORS - restrict to localhost origins only
   const LOCALHOST_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;

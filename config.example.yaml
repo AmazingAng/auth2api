@@ -8,6 +8,9 @@ auth-dir: "~/.auth2api"
 api-keys:
   - "your-api-key-here"
 
+# Maximum JSON request body size
+body-limit: "200mb"
+
 # Cloaking settings (masquerade as Claude Code CLI)
 cloaking:
   mode: "auto"          # auto | always | never

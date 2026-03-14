@@ -21,6 +21,7 @@ export interface Config {
   port: number;
   "auth-dir": string;
   "api-keys": string[];
+  "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   debug: boolean;
@@ -31,6 +32,7 @@ const DEFAULT_CONFIG: Config = {
   port: 8317,
   "auth-dir": "~/.auth2api",
   "api-keys": [],
+  "body-limit": "200mb",
   cloaking: {
     mode: "auto",
     "strict-mode": false,

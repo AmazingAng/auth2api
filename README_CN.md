@@ -78,6 +78,8 @@ auth-dir: "~/.auth2api"   # OAuth token 存储目录
 api-keys:
   - "your-api-key-here"   # 客户端使用这个 key 访问代理
 
+body-limit: "200mb"       # 最大 JSON 请求体大小，适合大上下文场景
+
 cloaking:
   mode: "auto"            # auto | always | never
   strict-mode: false
@@ -97,6 +99,8 @@ timeouts:
 ```
 
 默认情况下，流式上游请求会允许持续 10 分钟后才会被 auth2api 主动中断。
+
+默认请求体大小限制现在是 `200mb`，比之前固定的 `20mb` 更适合 Claude Code 的大上下文使用场景。
 
 ## 使用方法
 
