@@ -123,46 +123,47 @@ async function requestJson(options: {
   });
 }
 
+function makeStreamResponse(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 test("Codex responses handler sends bearer token and maps response", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-codex-responses-"));
   const authFile = path.join(authDir, ".codex", "auth.json");
   writeAuth(authFile, "codex-access-token");
   const provider = new CodexProvider(makeConfig(authDir, authFile));
-  const calls: Array<{ url: string; auth?: string; body: any }> = [];
+  const calls: Array<{ url: string; auth?: string; accept?: string; body: any }> = [];
 
   const restoreFetch = global.fetch;
   global.fetch = (async (input, init) => {
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    const headers = init?.headers as Record<string, string> | undefined;
     calls.push({
       url: String(input),
-      auth: init?.headers && (init.headers as Record<string, string>).Authorization,
+      auth: headers?.Authorization,
+      accept: headers?.Accept,
       body,
     });
 
-    return new Response(
-      JSON.stringify({
-        id: "resp_123",
-        object: "response",
-        created_at: 1711756800,
-        status: "completed",
-        model: "gpt-5.4",
-        output: [{
-          type: "message",
-          id: "msg_123",
-          role: "assistant",
-          status: "completed",
-          content: [
-            { type: "output_text", text: "hello from codex", annotations: [] },
-          ],
-        }],
-        usage: {
-          input_tokens: 12,
-          output_tokens: 8,
-          total_tokens: 20,
-        },
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    return makeStreamResponse([
+      "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"created_at\":1711756800,\"status\":\"in_progress\",\"model\":\"gpt-5.4\"}}\n\n",
+      "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"delta\":\"hello from codex\"}\n\n",
+      "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"created_at\":1711756800,\"status\":\"completed\",\"model\":\"gpt-5.4\",\"usage\":{\"input_tokens\":12,\"output_tokens\":8,\"total_tokens\":20}}}\n\n",
+      "event: response.done\ndata: {\"type\":\"response.done\",\"sequence_number\":4}\n\n",
+    ]);
   }) as typeof fetch;
 
   const server = await startApp(provider.handleResponses());
@@ -186,12 +187,64 @@ test("Codex responses handler sends bearer token and maps response", async (t) =
 
   assert.equal(calls[0]?.url, "https://chatgpt.com/backend-api/codex/responses");
   assert.equal(calls[0]?.auth, "Bearer codex-access-token");
+  assert.equal(calls[0]?.accept, "text/event-stream");
   assert.equal(calls[0]?.body.model, "gpt-5.4");
+  assert.equal(calls[0]?.body.instructions, "");
+  assert.equal(calls[0]?.body.store, false);
+  assert.equal(calls[0]?.body.stream, true);
   assert.equal(resp.status, 200);
   assert.equal(resp.body.object, "response");
   assert.equal(resp.body.model, "gpt-5.4");
   assert.equal(resp.body.output[0].content[0].text, "hello from codex");
   assert.equal(resp.body.usage.total_tokens, 20);
+});
+
+test("Codex responses handler converts system input role to developer", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-codex-responses-system-"));
+  const authFile = path.join(authDir, ".codex", "auth.json");
+  writeAuth(authFile, "codex-access-token");
+  const provider = new CodexProvider(makeConfig(authDir, authFile));
+  const calls: Array<{ body: any }> = [];
+
+  const restoreFetch = global.fetch;
+  global.fetch = (async (_input, init) => {
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    calls.push({ body });
+
+    return makeStreamResponse([
+      "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":1}\n\n",
+      "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"status\":\"completed\",\"model\":\"gpt-5.4\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+      "event: response.done\ndata: {\"type\":\"response.done\",\"sequence_number\":3}\n\n",
+    ]);
+  }) as typeof fetch;
+
+  const server = await startApp(provider.handleResponses());
+
+  t.after(async () => {
+    global.fetch = restoreFetch;
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.4",
+      input: [
+        { role: "system", content: "be precise" },
+        { role: "user", content: "hello" },
+      ],
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(calls[0]?.body.store, false);
+  assert.equal(calls[0]?.body.stream, true);
+  assert.equal(calls[0]?.body.input[0].role, "developer");
+  assert.equal(calls[0]?.body.input[1].role, "user");
 });
 
 test("Codex responses handler returns controlled error when auth file is missing", async (t) => {

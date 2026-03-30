@@ -40,6 +40,17 @@ npm install
 npm run build
 ```
 
+## Quick start
+
+1. Copy `config.example.yaml` to `config.yaml`.
+2. Set at least one API key under `api-keys`.
+3. Pick one or both providers:
+   - Codex only: make sure `~/.codex/auth.json` already exists, then set `codex.models`.
+   - Claude: run `node dist/index.js --login` once.
+4. Start the server with `node dist/index.js`.
+
+If you start with Codex only, Claude routes such as `/v1/messages` remain unavailable until you complete the Claude login flow.
+
 ## Login
 
 Claude models still use auth2api's built-in OAuth login flow. Codex models do not have a separate login flow here — auth2api reuses the local Codex session from `~/.codex/auth.json`.
@@ -72,6 +83,8 @@ The process can start with either provider:
 
 - Claude available via `node dist/index.js --login`
 - Codex available via an existing `~/.codex/auth.json`
+
+If neither a Claude token nor a usable Codex configuration is available, auth2api exits at startup instead of serving partial misconfiguration.
 
 If the configured Claude account is temporarily cooled down after upstream rate limiting, auth2api now returns `429 Rate limited on the configured account` instead of a generic `503`.
 
@@ -122,6 +135,12 @@ The default request body limit is `200mb`, which is more suitable for large Clau
 
 Codex models exposed by `/v1/models` come from `codex.models`. Claude models are built in.
 
+Important routing semantics:
+
+- `codex.enabled: false` disables all Codex routing.
+- `codex.models` is both the `/v1/models` output and the runtime allowlist for Codex requests.
+- A `gpt-*`, `o*`, or `codex-*` request for a model not listed in `codex.models` returns `400 Unsupported model`.
+
 `debug` now supports three levels:
 - `off`: no extra logs
 - `errors`: log upstream/network failures and upstream error bodies
@@ -146,6 +165,21 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 - `claude-*` -> Claude provider
 - `gpt-*`, `o*`, `codex-*` -> Codex provider
+
+Unsupported or disallowed models return `400 Unsupported model`.
+
+Example Codex request:
+
+```bash
+curl http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4",
+    "messages": [{"role": "user", "content": "Summarize this repo."}],
+    "stream": false
+  }'
+```
 
 ### Available models
 
@@ -198,6 +232,12 @@ Or with docker-compose:
 docker-compose up -d
 ```
 
+Container notes:
+
+- If you want Claude login persistence in Docker, set `auth-dir: "/data"` in `config.yaml`.
+- If you want Codex models in Docker, mount the host auth file to the same path configured by `codex.auth-file`, for example `-v ~/.codex/auth.json:/root/.codex/auth.json:ro`.
+- If you change the in-container path, update `codex.auth-file` to match.
+
 ## Use with Claude Code
 
 Set `ANTHROPIC_BASE_URL` to point Claude Code at auth2api:
@@ -230,6 +270,12 @@ curl http://127.0.0.1:8317/admin/accounts \
 ```
 
 The response includes legacy Claude account snapshots plus separate `claude` and `codex` provider sections so you can see provider availability independently.
+
+Useful fields:
+
+- `claude.available`: whether a Claude account is currently usable
+- `codex.available`: whether Codex auth plus model configuration is usable
+- `codex.details.error`: why Codex is currently unavailable, for example missing auth file or empty model configuration
 
 ## Smoke tests
 

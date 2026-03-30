@@ -40,6 +40,17 @@ npm install
 npm run build
 ```
 
+## 快速开始
+
+1. 复制 `config.example.yaml` 为 `config.yaml`。
+2. 在 `api-keys` 里至少配置一个 API key。
+3. 选择一个或两个 provider：
+   - 只用 Codex：确保本机已经有 `~/.codex/auth.json`，然后配置 `codex.models`。
+   - 使用 Claude：先执行一次 `node dist/index.js --login`。
+4. 执行 `node dist/index.js` 启动服务。
+
+如果你一开始只启用了 Codex，那么像 `/v1/messages` 这类 Claude 原生接口在完成 Claude 登录前仍然不可用。
+
 ## 登录
 
 Claude 模型仍然使用 auth2api 内置的 OAuth 登录流程。Codex 模型没有单独的登录流程，auth2api 直接复用本机 `~/.codex/auth.json`。
@@ -72,6 +83,8 @@ node dist/index.js
 
 - Claude 可用：先执行 `node dist/index.js --login`
 - Codex 可用：本机已有 `~/.codex/auth.json`
+
+如果 Claude token 不存在，且 Codex 配置或认证也不可用，auth2api 会在启动时直接退出，而不是带着错误配置继续提供服务。
 
 如果上游因为限流导致当前账号进入 cooldown，auth2api 会返回 `429 Rate limited on the configured account`，而不是通用的 `503`。
 
@@ -122,6 +135,12 @@ codex:
 
 `/v1/models` 里的 Codex 模型来自 `codex.models` 配置；Claude 模型则是内置列表。
 
+几个关键语义：
+
+- `codex.enabled: false` 会彻底关闭 Codex 路由。
+- `codex.models` 既决定 `/v1/models` 的输出，也决定运行时允许访问的 Codex 模型白名单。
+- 如果请求的是 `gpt-*`、`o*`、`codex-*`，但模型不在 `codex.models` 里，会直接返回 `400 Unsupported model`。
+
 `debug` 现在支持三级日志：
 - `off`：不输出额外调试日志
 - `errors`：记录上游/网络失败信息和上游错误响应正文
@@ -146,6 +165,21 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 - `claude-*` -> Claude provider
 - `gpt-*`、`o*`、`codex-*` -> Codex provider
+
+不支持或未被允许的模型会返回 `400 Unsupported model`。
+
+Codex 请求示例：
+
+```bash
+curl http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4",
+    "messages": [{"role": "user", "content": "Summarize this repo."}],
+    "stream": false
+  }'
+```
 
 ### 支持的模型
 
@@ -198,6 +232,12 @@ docker run -d \
 docker-compose up -d
 ```
 
+容器使用注意：
+
+- 如果你希望 Claude 登录态持久化，建议在 `config.yaml` 里把 `auth-dir` 设成 `"/data"`。
+- 如果你要在 Docker 里使用 Codex，需要把宿主机的 auth 文件挂载到容器内与 `codex.auth-file` 一致的路径，例如 `-v ~/.codex/auth.json:/root/.codex/auth.json:ro`。
+- 如果你改了容器内路径，记得同步修改 `codex.auth-file`。
+
 ## 与 Claude Code 配合使用
 
 将 `ANTHROPIC_BASE_URL` 指向 auth2api：
@@ -230,6 +270,12 @@ curl http://127.0.0.1:8317/admin/accounts \
 ```
 
 返回内容包含旧版 Claude 账号快照，以及拆开的 `claude`、`codex` provider 状态，便于分别判断哪一侧不可用。
+
+常用字段：
+
+- `claude.available`：当前 Claude 账号是否可用
+- `codex.available`：Codex 认证和模型配置是否可用
+- `codex.details.error`：Codex 当前不可用的具体原因，例如认证文件缺失或模型配置为空
 
 ## Smoke 测试
 

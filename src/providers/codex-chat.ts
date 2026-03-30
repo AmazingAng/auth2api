@@ -1,6 +1,8 @@
 import express from "express";
 import { v4 as uuidv4 } from "uuid";
 import { CodexAuthError, CodexAuthStore } from "./codex-auth";
+import { normalizeCodexRequestBody } from "./codex-request";
+import { collectCodexResponseFromSse } from "./codex-sse";
 import { callCodexResponses } from "./codex-upstream";
 
 function authErrorResponse(message: string): { status: number; body: { error: { message: string } } } {
@@ -138,11 +140,11 @@ function canonicalizeChatRequest(body: any, stream: boolean): any {
       }))
     : [];
 
-  return {
+  return normalizeCodexRequestBody({
     model: body?.model || "gpt-5.4",
     input,
     stream,
-  };
+  });
 }
 
 async function streamCodexChatResponses(upstreamResp: Response, res: express.Response, model: string): Promise<void> {
@@ -299,7 +301,11 @@ export function createCodexChatCompletionsHandler(authStore: CodexAuthStore): ex
 
       const stream = !!body.stream;
       const canonicalRequest = canonicalizeChatRequest(body, stream);
-      const upstreamResp = await callCodexResponses(snapshot.accessToken, canonicalRequest, stream);
+      const upstreamRequest = {
+        ...canonicalRequest,
+        stream: true,
+      };
+      const upstreamResp = await callCodexResponses(snapshot.accessToken, upstreamRequest, true);
       if (!upstreamResp.ok) {
         const text = await upstreamResp.text().catch(() => "");
         res.status(upstreamResp.status).json({
@@ -313,7 +319,7 @@ export function createCodexChatCompletionsHandler(authStore: CodexAuthStore): ex
         return;
       }
 
-      const upstreamJson = await upstreamResp.json();
+      const upstreamJson = await collectCodexResponseFromSse(upstreamResp);
       res.json(normalizeResponse(upstreamJson, canonicalRequest.model));
     } catch (error: any) {
       res.status(500).json({ error: { message: error?.message || "Internal server error" } });
