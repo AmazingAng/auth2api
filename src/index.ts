@@ -6,6 +6,7 @@ import { generatePKCECodes } from "./auth/pkce";
 import { generateAuthURL, exchangeCodeForTokens } from "./auth/oauth";
 import { waitForCallback } from "./auth/callback-server";
 import { createServer } from "./server";
+import { canStartServer } from "./startup";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -73,8 +74,8 @@ async function startServer(): Promise<void> {
   const manager = new AccountManager(authDir);
   manager.load();
 
-  if (manager.accountCount === 0) {
-    console.log("No account found. Run with --login to add your account first.");
+  if (!canStartServer(config, manager)) {
+    console.log("No provider auth found. Run with --login for Claude or ensure Codex auth exists first.");
     process.exit(1);
   }
 

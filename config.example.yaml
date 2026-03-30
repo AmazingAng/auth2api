@@ -1,7 +1,7 @@
 host: ""
 port: 8317
 
-# Directory to store OAuth tokens
+# Directory to store Claude OAuth tokens
 auth-dir: "~/.auth2api"
 
 # API keys for client authentication (clients use these to access this proxy)
@@ -23,6 +23,15 @@ timeouts:
   messages-ms: 120000         # non-stream /v1/messages timeout
   stream-messages-ms: 600000  # stream /v1/messages timeout, suitable for Claude Code long tasks
   count-tokens-ms: 30000      # /v1/messages/count_tokens timeout
+
+# Codex provider settings (reuses local Codex login state)
+codex:
+  enabled: true
+  auth-file: "~/.codex/auth.json"
+  models:
+    - "gpt-5.4"
+    - "o3"
+    - "codex-mini-latest"
 
 # Debug logging level:
 # off = no extra logs

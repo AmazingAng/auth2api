@@ -14,6 +14,7 @@ import { saveToken } from "../src/auth/token-storage";
 import { TokenData } from "../src/auth/types";
 
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
+const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 
 function makeConfig(authDir: string): Config {
   return {
@@ -34,6 +35,18 @@ function makeConfig(authDir: string): Config {
       "count-tokens-ms": 30000,
     },
     debug: "off",
+    codex: {
+      enabled: true,
+      "auth-file": path.join(authDir, "codex-auth.json"),
+      models: ["gpt-5.4", "o3", "codex-mini-latest"],
+    },
+  };
+}
+
+function makeConfigWithCodex(authDir: string, codex: Config["codex"]): Config {
+  return {
+    ...makeConfig(authDir),
+    codex,
   };
 }
 
@@ -54,6 +67,21 @@ function makeManager(authDir: string, tokens: TokenData[]): AccountManager {
   const manager = new AccountManager(authDir);
   manager.load();
   return manager;
+}
+
+function writeCodexAuth(authDir: string): void {
+  fs.writeFileSync(
+    path.join(authDir, "codex-auth.json"),
+    JSON.stringify({
+      auth_mode: "oauth",
+      last_refresh: new Date().toISOString(),
+      tokens: {
+        access_token: "codex-access-token",
+        refresh_token: "codex-refresh-token",
+        account_id: "acct_codex",
+      },
+    })
+  );
 }
 
 async function startApp(config: Config, manager: AccountManager): Promise<http.Server> {
@@ -153,6 +181,7 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
   assert.equal(modelsResp.status, 200);
   assert.ok(Array.isArray(modelsResp.body.data));
   assert.ok(modelsResp.body.data.length > 0);
+  assert.equal(modelsResp.body.data.some((model: { id: string }) => model.id === "claude-sonnet-4-6"), true);
 
   const adminResp = await requestJson({
     server,
@@ -209,6 +238,124 @@ test("proxies a non-stream chat completion through Claude OAuth token", async (t
   assert.equal(resp.body.object, "chat.completion");
   assert.equal(resp.body.choices[0].message.content, "hello from claude");
   assert.equal(resp.body.usage.total_tokens, 17);
+});
+
+test("routes OpenAI responses requests to Codex based on model", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  writeCodexAuth(authDir);
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    const url = String(input);
+    assert.equal(url, CODEX_RESPONSES_URL);
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.headers && (init.headers as Record<string, string>).Authorization, "Bearer codex-access-token");
+
+    const parsedBody = JSON.parse(String(init?.body || "{}"));
+    assert.equal(parsedBody.model, "gpt-5.4");
+    assert.equal(parsedBody.input[0].content, "hello codex");
+
+    return new Response(
+      JSON.stringify({
+        id: "resp_codex",
+        object: "response",
+        model: "gpt-5.4",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hello from codex" }],
+          },
+        ],
+        usage: { input_tokens: 7, output_tokens: 4, total_tokens: 11 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.4",
+      input: [{ role: "user", content: "hello codex" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(resp.body.object, "response");
+  assert.equal(resp.body.model, "gpt-5.4");
+  assert.equal(resp.body.output[0].content[0].text, "hello from codex");
+  assert.equal(resp.body.usage.total_tokens, 11);
+});
+
+test("routes OpenAI chat completions requests to Codex based on model", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  writeCodexAuth(authDir);
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    const url = String(input);
+    assert.equal(url, CODEX_RESPONSES_URL);
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.headers && (init.headers as Record<string, string>).Authorization, "Bearer codex-access-token");
+
+    const parsedBody = JSON.parse(String(init?.body || "{}"));
+    assert.equal(parsedBody.model, "gpt-5.4");
+    assert.equal(parsedBody.input[0].content, "hello from codex chat");
+
+    return new Response(
+      JSON.stringify({
+        id: "resp_codex_chat",
+        object: "response",
+        model: "gpt-5.4",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hello from codex chat" }],
+          },
+        ],
+        usage: { input_tokens: 6, output_tokens: 5, total_tokens: 11 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "hello from codex chat" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(resp.body.object, "chat.completion");
+  assert.equal(resp.body.model, "gpt-5.4");
+  assert.equal(resp.body.choices[0].message.content, "hello from codex chat");
+  assert.equal(resp.body.usage.total_tokens, 11);
 });
 
 test("refreshes the OAuth token after an upstream 401 and retries successfully", async (t) => {
@@ -319,6 +466,139 @@ test("returns rate limited when the configured account is cooled down", async (t
 
   assert.equal(resp.status, 429);
   assert.equal(resp.body.error.message, "Rate limited on the configured account");
+});
+
+test("missing Codex auth only breaks Codex models and still allows Claude models", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    const url = String(input);
+    assert.equal(url, "https://api.anthropic.com/v1/messages?beta=true");
+    assert.equal(init?.headers && (init.headers as Record<string, string>).Authorization, "Bearer access-token");
+
+    return new Response(
+      JSON.stringify({
+        id: "msg_claude_ok",
+        content: [{ type: "text", text: "claude still works" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 5, output_tokens: 3 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const codexResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "hi codex" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(codexResp.status, 503);
+  assert.match(codexResp.body.error.message, /Codex auth file not found/);
+
+  const claudeResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi claude" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(claudeResp.status, 200);
+  assert.equal(claudeResp.body.choices[0].message.content, "claude still works");
+});
+
+test("disabled Codex provider rejects Codex models without falling back to Claude", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  writeCodexAuth(authDir);
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("Upstream should not be called when Codex provider is disabled");
+  });
+  const server = await startApp(
+    makeConfigWithCodex(authDir, {
+      enabled: false,
+      "auth-file": path.join(authDir, "codex-auth.json"),
+      models: ["gpt-5.4"],
+    }),
+    manager
+  );
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "disabled codex" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(resp.status, 400);
+  assert.equal(resp.body.error.message, "Unsupported model: gpt-5.4");
+});
+
+test("Codex models not listed in config are rejected", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  writeCodexAuth(authDir);
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("Upstream should not be called for disallowed Codex models");
+  });
+  const server = await startApp(
+    makeConfigWithCodex(authDir, {
+      enabled: true,
+      "auth-file": path.join(authDir, "codex-auth.json"),
+      models: ["gpt-5.4"],
+    }),
+    manager
+  );
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "o3",
+      input: [{ role: "user", content: "not configured" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(resp.status, 400);
+  assert.equal(resp.body.error.message, "Unsupported model: o3");
 });
 
 test("rejects loading multiple accounts in single-account mode", (t) => {

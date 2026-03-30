@@ -3,19 +3,9 @@ import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { AccountManager } from "./accounts/manager";
 import { extractApiKey } from "./api-key";
-import { createChatCompletionsHandler } from "./proxy/handler";
-import { createMessagesHandler, createCountTokensHandler } from "./proxy/passthrough";
-import { createResponsesHandler } from "./proxy/responses";
-
-const SUPPORTED_MODELS = [
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5-20251001",
-  "claude-haiku-4-5",
-  "opus",
-  "sonnet",
-  "haiku",
-] as const;
+import { ClaudeProvider } from "./providers/claude";
+import { CodexProvider } from "./providers/codex";
+import { resolveProviderFromModel } from "./providers/router";
 
 // Timing-safe API key comparison
 function safeCompare(a: string, b: string): boolean {
@@ -57,6 +47,44 @@ cleanupTimer.unref();
 
 export function createServer(config: Config, manager: AccountManager): express.Application {
   const app = express();
+  const claudeProvider = new ClaudeProvider(config, manager);
+  const codexProvider = new CodexProvider(config);
+  const routeByModel =
+    (
+      claudeHandler: express.RequestHandler,
+      codexHandler: express.RequestHandler
+    ): express.RequestHandler =>
+    (req, res, next) => {
+      const model = req.body?.model;
+      const provider = resolveProviderFromModel(model);
+
+      if (provider === "codex") {
+        if (!codexProvider.supportsModel(model)) {
+          res.status(400).json({ error: { message: `Unsupported model: ${String(model)}` } });
+          return;
+        }
+        codexHandler(req, res, next);
+        return;
+      }
+
+      if (provider === "claude") {
+        claudeHandler(req, res, next);
+        return;
+      }
+
+      if (claudeProvider.supportsModel(model)) {
+        claudeHandler(req, res, next);
+        return;
+      }
+
+      if (codexProvider.supportsModel(model)) {
+        codexHandler(req, res, next);
+        return;
+      }
+
+      res.status(400).json({ error: { message: `Unsupported model: ${String(model)}` } });
+      return;
+    };
 
   app.use(express.json({ limit: config["body-limit"] }));
 
@@ -119,21 +147,28 @@ export function createServer(config: Config, manager: AccountManager): express.A
   app.use("/admin", requireApiKey);
 
   // Routes — OpenAI compatible
-  app.post("/v1/chat/completions", createChatCompletionsHandler(config, manager));
-  app.post("/v1/responses", createResponsesHandler(config, manager));
+  app.post(
+    "/v1/chat/completions",
+    routeByModel(claudeProvider.handleChatCompletions(), codexProvider.handleChatCompletions())
+  );
+  app.post(
+    "/v1/responses",
+    routeByModel(claudeProvider.handleResponses(), codexProvider.handleResponses())
+  );
 
   // Routes — Claude native passthrough
-  app.post("/v1/messages/count_tokens", createCountTokensHandler(config, manager));
-  app.post("/v1/messages", createMessagesHandler(config, manager));
+  app.post("/v1/messages/count_tokens", claudeProvider.handleCountTokens());
+  app.post("/v1/messages", claudeProvider.handleMessages());
 
   app.get("/v1/models", (_req, res) => {
+    const models = [...claudeProvider.listModels(), ...codexProvider.listModels()];
     res.json({
       object: "list",
-      data: SUPPORTED_MODELS.map((id) => ({
-        id,
+      data: models.map((model) => ({
+        id: model.id,
         object: "model",
         created: Math.floor(Date.now() / 1000),
-        owned_by: "anthropic",
+        owned_by: model.ownedBy,
       })),
     });
   });
@@ -144,9 +179,13 @@ export function createServer(config: Config, manager: AccountManager): express.A
   });
 
   app.get("/admin/accounts", (_req, res) => {
+    const claudeStatus = claudeProvider.getStatus();
+    const codexStatus = codexProvider.getStatus();
     res.json({
       accounts: manager.getSnapshots(),
       account_count: manager.accountCount,
+      claude: claudeStatus,
+      codex: codexStatus,
       generated_at: new Date().toISOString(),
     });
   });
