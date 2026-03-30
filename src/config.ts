@@ -16,6 +16,12 @@ export interface TimeoutConfig {
   "count-tokens-ms": number;
 }
 
+export interface CodexConfig {
+  enabled: boolean;
+  "auth-file": string;
+  models: string[];
+}
+
 export type DebugMode = "off" | "errors" | "verbose";
 
 export interface Config {
@@ -26,6 +32,7 @@ export interface Config {
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
+  codex: CodexConfig;
   debug: DebugMode;
 }
 
@@ -45,6 +52,11 @@ const DEFAULT_CONFIG: Config = {
     "messages-ms": 120000,
     "stream-messages-ms": 600000,
     "count-tokens-ms": 30000,
+  },
+  codex: {
+    enabled: true,
+    "auth-file": "~/.codex/auth.json",
+    models: [],
   },
   debug: "off",
 };
@@ -87,6 +99,7 @@ export function loadConfig(configPath?: string): Config {
       ...parsed,
       cloaking: { ...DEFAULT_CONFIG.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_CONFIG.timeouts, ...(parsed.timeouts || {}) },
+      codex: { ...DEFAULT_CONFIG.codex, ...(parsed.codex || {}) },
     };
   }
 
