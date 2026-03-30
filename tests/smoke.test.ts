@@ -153,6 +153,7 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
   assert.equal(modelsResp.status, 200);
   assert.ok(Array.isArray(modelsResp.body.data));
   assert.ok(modelsResp.body.data.length > 0);
+  assert.equal(modelsResp.body.data.some((model: { id: string }) => model.id === "claude-sonnet-4-6"), true);
 
   const adminResp = await requestJson({
     server,

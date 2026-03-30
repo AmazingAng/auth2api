@@ -3,19 +3,7 @@ import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { AccountManager } from "./accounts/manager";
 import { extractApiKey } from "./api-key";
-import { createChatCompletionsHandler } from "./proxy/handler";
-import { createMessagesHandler, createCountTokensHandler } from "./proxy/passthrough";
-import { createResponsesHandler } from "./proxy/responses";
-
-const SUPPORTED_MODELS = [
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5-20251001",
-  "claude-haiku-4-5",
-  "opus",
-  "sonnet",
-  "haiku",
-] as const;
+import { ClaudeProvider } from "./providers/claude";
 
 // Timing-safe API key comparison
 function safeCompare(a: string, b: string): boolean {
@@ -57,6 +45,7 @@ cleanupTimer.unref();
 
 export function createServer(config: Config, manager: AccountManager): express.Application {
   const app = express();
+  const claudeProvider = new ClaudeProvider(config, manager);
 
   app.use(express.json({ limit: config["body-limit"] }));
 
@@ -119,21 +108,21 @@ export function createServer(config: Config, manager: AccountManager): express.A
   app.use("/admin", requireApiKey);
 
   // Routes — OpenAI compatible
-  app.post("/v1/chat/completions", createChatCompletionsHandler(config, manager));
-  app.post("/v1/responses", createResponsesHandler(config, manager));
+  app.post("/v1/chat/completions", claudeProvider.handleChatCompletions());
+  app.post("/v1/responses", claudeProvider.handleResponses());
 
   // Routes — Claude native passthrough
-  app.post("/v1/messages/count_tokens", createCountTokensHandler(config, manager));
-  app.post("/v1/messages", createMessagesHandler(config, manager));
+  app.post("/v1/messages/count_tokens", claudeProvider.handleCountTokens());
+  app.post("/v1/messages", claudeProvider.handleMessages());
 
   app.get("/v1/models", (_req, res) => {
     res.json({
       object: "list",
-      data: SUPPORTED_MODELS.map((id) => ({
-        id,
+      data: claudeProvider.listModels().map((model) => ({
+        id: model.id,
         object: "model",
         created: Math.floor(Date.now() / 1000),
-        owned_by: "anthropic",
+        owned_by: model.ownedBy,
       })),
     });
   });
