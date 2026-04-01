@@ -3,11 +3,15 @@ import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
 
+/**
+ * Cloaking configuration for request fingerprinting.
+ * Controls how auth2api mimics Claude Code CLI's request signature.
+ */
 export interface CloakingConfig {
-  mode: "auto" | "always" | "never";
-  "strict-mode": boolean;
-  "sensitive-words": string[];
-  "cache-user-id": boolean;
+  /** CLI version to impersonate in User-Agent and fingerprint (default: 2.1.88) */
+  "cli-version"?: string;
+  /** Entrypoint value for billing header (default: cli) */
+  entrypoint?: string;
 }
 
 export interface TimeoutConfig {
@@ -36,10 +40,8 @@ const DEFAULT_CONFIG: Config = {
   "api-keys": [],
   "body-limit": "200mb",
   cloaking: {
-    mode: "auto",
-    "strict-mode": false,
-    "sensitive-words": [],
-    "cache-user-id": false,
+    "cli-version": "2.1.88",
+    entrypoint: "cli",
   },
   timeouts: {
     "messages-ms": 120000,
@@ -85,6 +87,7 @@ export function loadConfig(configPath?: string): Config {
     config = {
       ...DEFAULT_CONFIG,
       ...parsed,
+      // Merge cloaking config with defaults
       cloaking: { ...DEFAULT_CONFIG.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_CONFIG.timeouts, ...(parsed.timeouts || {}) },
     };

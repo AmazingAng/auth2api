@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { Request, Response as ExpressResponse } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { extractApiKey } from "../api-key";
@@ -449,11 +450,11 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const userAgent = req.headers["user-agent"] || "";
       const apiKey = extractApiKey(req.headers);
+      const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
 
       let claudeBody = responsesToClaude(body);
-      claudeBody = applyCloaking(claudeBody, config.cloaking, userAgent, apiKey);
+      claudeBody = applyCloaking(claudeBody, manager.getDeviceId(), manager.getAccountUuid(), apiKeyHash, config.cloaking);
 
       let lastStatus = 500;
       const refreshedAccounts = new Set<string>();
@@ -473,7 +474,7 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
 
         let upstreamResp: globalThis.Response;
         try {
-          upstreamResp = await callClaudeAPI(account.accessToken, claudeBody, stream, config.timeouts);
+          upstreamResp = await callClaudeAPI(account.accessToken, claudeBody, stream, config.timeouts, config.cloaking, apiKeyHash);
         } catch (err: any) {
           manager.recordFailure(account.email, "network", err.message);
           if (isDebugLevel(config.debug, "errors")) {

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { Request, Response as ExpressResponse } from "express";
 import { extractApiKey } from "../api-key";
 import { Config, isDebugLevel } from "../config";
@@ -21,19 +22,32 @@ export function createChatCompletionsHandler(config: Config, manager: AccountMan
   return async (req: Request, res: ExpressResponse): Promise<void> => {
     try {
       const body = req.body;
-      if (!body.messages || !Array.isArray(body.messages)) {
-        res.status(400).json({ error: { message: "messages is required" } });
+      if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+        res.status(400).json({ error: { message: "messages is required and must be a non-empty array" } });
         return;
       }
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const userAgent = req.headers["user-agent"] || "";
       const apiKey = extractApiKey(req.headers);
+      const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
 
       // Translate OpenAI -> Claude
       let claudeBody = openaiToClaude(body);
-      claudeBody = applyCloaking(claudeBody, config.cloaking, userAgent, apiKey);
+
+      // Debug: log translated body before cloaking
+      if (isDebugLevel(config.debug, "verbose")) {
+        console.log("[DEBUG] Translated OpenAI->Claude body (before cloaking):");
+        console.log(JSON.stringify(claudeBody, null, 2));
+      }
+
+      claudeBody = applyCloaking(claudeBody, manager.getDeviceId(), manager.getAccountUuid(), apiKeyHash, config.cloaking);
+
+      // Debug: log final body after cloaking
+      if (isDebugLevel(config.debug, "verbose")) {
+        console.log("[DEBUG] Final body after cloaking:");
+        console.log(JSON.stringify(claudeBody, null, 2));
+      }
 
       // Retry with account switching on retryable errors
       let lastStatus = 500;
@@ -59,7 +73,7 @@ export function createChatCompletionsHandler(config: Config, manager: AccountMan
 
         let upstreamResp: globalThis.Response;
         try {
-          upstreamResp = await callClaudeAPI(account.accessToken, claudeBody, stream, config.timeouts);
+          upstreamResp = await callClaudeAPI(account.accessToken, claudeBody, stream, config.timeouts, config.cloaking, apiKeyHash);
         } catch (err: any) {
           manager.recordFailure(account.email, "network", err.message);
           if (isDebugLevel(config.debug, "errors")) {
