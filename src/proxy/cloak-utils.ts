@@ -1,33 +1,28 @@
 import crypto from "crypto";
-import { v4 as uuidv4 } from "uuid";
+import fs from "fs";
+import path from "path";
 
-export function generateFakeUserID(): string {
-  const hex64 = crypto.randomBytes(32).toString("hex");
-  return `user_${hex64}_account_${uuidv4()}_session_${uuidv4()}`;
-}
+/**
+ * Persistent device_id — one per auth2api instance, same as real Claude Code's
+ * getOrCreateUserID() which generates once and saves to global config.
+ *
+ * Format: randomBytes(32).toString("hex") → 64-char hex string.
+ */
+let cachedDeviceId: string | null = null;
 
-const USER_ID_RE = /^user_[a-fA-F0-9]{64}_account_[0-9a-f-]{36}_session_[0-9a-f-]{36}$/;
+export function getDeviceId(authDir: string): string {
+  if (cachedDeviceId) return cachedDeviceId;
 
-export function isValidFakeUserID(id: string): boolean {
-  return USER_ID_RE.test(id);
-}
+  const filePath = path.join(authDir, ".device_id");
+  try {
+    cachedDeviceId = fs.readFileSync(filePath, "utf-8").trim();
+    if (cachedDeviceId && /^[a-f0-9]{64}$/.test(cachedDeviceId)) {
+      return cachedDeviceId;
+    }
+  } catch {}
 
-export function shouldCloak(mode: string, userAgent: string): boolean {
-  if (mode === "always") return true;
-  if (mode === "never") return false;
-  return !userAgent.startsWith("claude-cli");
-}
-
-// In-memory cache for user IDs per API key
-const userIdCache = new Map<string, string>();
-
-export function getCachedUserID(apiKey: string, useCache: boolean): string {
-  if (!useCache) return generateFakeUserID();
-  const key = crypto.createHash("sha256").update(apiKey).digest("hex");
-  let id = userIdCache.get(key);
-  if (!id) {
-    id = generateFakeUserID();
-    userIdCache.set(key, id);
-  }
-  return id;
+  cachedDeviceId = crypto.randomBytes(32).toString("hex");
+  fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, cachedDeviceId, { mode: 0o600 });
+  return cachedDeviceId;
 }

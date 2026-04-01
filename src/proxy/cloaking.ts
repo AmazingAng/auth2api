@@ -1,89 +1,166 @@
 import crypto from "crypto";
 import { CloakingConfig } from "../config";
-import { shouldCloak, getCachedUserID, isValidFakeUserID } from "./cloak-utils";
+import { getSessionId } from "./claude-api";
 
-function randomHex(bytes: number): string {
-  return crypto.randomBytes(bytes).toString("hex").slice(0, bytes * 2);
+/** Default values */
+const DEFAULT_CLI_VERSION = "2.1.88";
+const DEFAULT_ENTRYPOINT = "cli";
+
+/**
+ * Fingerprint algorithm — exact replica of Claude Code's utils/fingerprint.ts
+ *
+ * Algorithm: SHA256(SALT + msg[4] + msg[7] + msg[20] + version).slice(0, 3)
+ * The salt and char indices must match the backend validator exactly.
+ */
+const FINGERPRINT_SALT = "59cf53e54c78";
+
+function extractFirstUserMessageText(messages: any[]): string {
+  if (!Array.isArray(messages)) return "";
+  const first = messages.find((m: any) => m.role === "user");
+  if (!first) return "";
+  if (typeof first.content === "string") return first.content;
+  if (Array.isArray(first.content)) {
+    const textBlock = first.content.find((b: any) => b.type === "text");
+    if (textBlock) return textBlock.text || "";
+  }
+  return "";
 }
 
-function generateBillingHeader(payload: string): string {
-  const buildHash = randomHex(2).slice(0, 3);
-  const cch = crypto.createHash("sha256").update(payload).digest("hex").slice(0, 5);
-  return `x-anthropic-billing-header: cc_version=2.1.63.${buildHash}; cc_entrypoint=cli; cch=${cch};`;
+function computeFingerprint(messageText: string, version: string): string {
+  const indices = [4, 7, 20];
+  const chars = indices.map((i) => messageText[i] || "0").join("");
+  const input = `${FINGERPRINT_SALT}${chars}${version}`;
+  return crypto.createHash("sha256").update(input).digest("hex").slice(0, 3);
 }
 
-function obfuscateSensitiveWords(text: string, words: string[]): string {
-  if (!words.length) return text;
-  const sorted = [...words].sort((a, b) => b.length - a.length);
-  const pattern = sorted.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  const re = new RegExp(`(${pattern})`, "gi");
-  return text.replace(re, (match) => match[0] + "\u200B" + match.slice(1));
+function generateBillingHeader(
+  messages: any[],
+  version: string,
+  entrypoint: string,
+  workload?: string,
+): string {
+  const msgText = extractFirstUserMessageText(messages);
+  const fp = computeFingerprint(msgText, version);
+
+  // cc_workload: optional workload tag (e.g., for cron-initiated requests)
+  const workloadPair = workload ? ` cc_workload=${workload};` : "";
+
+  return `x-anthropic-billing-header: cc_version=${version}.${fp}; cc_entrypoint=${entrypoint};${workloadPair}`;
 }
 
+/**
+ * Build metadata.user_id — JSON-stringified object matching real Claude Code.
+ *
+ * - device_id: fixed per auth2api instance (one "installation")
+ * - account_uuid: fixed per OAuth account
+ * - session_id: varies per API key (each downstream user = separate CLI session)
+ */
+function buildUserId(
+  deviceId: string,
+  accountUuid: string,
+  sessionId: string,
+): string {
+  return JSON.stringify({
+    device_id: deviceId,
+    account_uuid: accountUuid,
+    session_id: sessionId,
+  });
+}
+
+/** Checks if system block is a billing header */
+function isBillingHeaderBlock(block: any): boolean {
+  return (
+    typeof block.text === "string" &&
+    block.text.includes("x-anthropic-billing-header")
+  );
+}
+
+/** Checks if system block is the CLI prefix */
+function isPrefixBlock(block: any): boolean {
+  return (
+    typeof block.text === "string" && block.text.includes("You are Claude Code")
+  );
+}
+
+/**
+ * Apply Claude Code cloaking to the request body.
+ *
+ * Supports two modes:
+ * 1. OpenAI-compatible clients: Injects billing header, prefix, and metadata
+ * 2. Claude Code CLI clients: Detects existing prefix/billing header, avoids duplication
+ *
+ * Always injects metadata.user_id (since external clients don't have the auth2api device_id).
+ */
 export function applyCloaking(
   body: any,
-  config: CloakingConfig,
-  userAgent: string,
-  apiKey: string
+  deviceId: string,
+  accountUuid: string,
+  apiKeyHash: string,
+  cloaking: CloakingConfig,
 ): any {
-  if (!shouldCloak(config.mode, userAgent)) return body;
+  const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
+  const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
 
-  const payload = JSON.stringify(body);
+  // Normalize existing system to array
+  const existingSystem = body.system || [];
+  const systemArray: any[] = Array.isArray(existingSystem)
+    ? [...existingSystem]
+    : [{ type: "text", text: existingSystem }];
 
-  // 1. Inject system prompt
-  const billingHeader = generateBillingHeader(payload);
-  const agentBlock = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+  // Detect if client already sent Claude Code-style system prompt
+  const hasBillingHeader = systemArray.some(isBillingHeaderBlock);
+  const hasPrefix = systemArray.some(isPrefixBlock);
 
-  const billingEntry = { type: "text", text: billingHeader };
-  const agentEntry = { type: "text", text: agentBlock };
+  // Build system blocks in correct order
+  const systemBlocks: any[] = [];
+  const PREFIX_TEXT =
+    "You are Claude Code, Anthropic's official CLI for Claude.";
 
-  if (config["strict-mode"]) {
-    body.system = [billingEntry, agentEntry];
+  // 1. Billing header (position 0)
+  if (hasBillingHeader) {
+    // Keep client's billing header (Claude Code CLI mode)
+    const existingBilling = systemArray.find(isBillingHeaderBlock)!;
+    systemBlocks.push(existingBilling);
   } else {
-    const existingSystem = body.system || [];
-    const systemArray = Array.isArray(existingSystem)
-      ? existingSystem
-      : [{ type: "text", text: existingSystem }];
-
-    // Add cache_control to existing system messages
-    const cachedSystem = systemArray.map((s: any) => ({
-      ...s,
-      cache_control: s.cache_control || { type: "ephemeral" },
-    }));
-
-    body.system = [billingEntry, agentEntry, ...cachedSystem];
+    // Generate our own (OpenAI client mode)
+    const billingHeader = generateBillingHeader(
+      body.messages || [],
+      cliVersion,
+      entrypoint,
+    );
+    systemBlocks.push({ type: "text", text: billingHeader });
   }
 
-  // 2. Inject fake user ID
+  // 2. Prefix block (position 1)
+  if (hasPrefix) {
+    // Keep client's prefix (Claude Code CLI mode)
+    const existingPrefix = systemArray.find(isPrefixBlock)!;
+    systemBlocks.push(existingPrefix);
+  } else {
+    systemBlocks.push({
+      type: "text",
+      text: PREFIX_TEXT,
+    });
+  }
+
+  for (const block of systemArray) {
+    // Skip billing header and prefix blocks (already handled above)
+    if (isBillingHeaderBlock(block) || isPrefixBlock(block)) {
+      continue;
+    }
+
+    systemBlocks.push(block);
+  }
+
+  body.system = systemBlocks;
+
+  // 4. metadata.user_id — always set since external clients don't have auth2api's device_id
   if (!body.metadata) body.metadata = {};
-  if (!body.metadata.user_id || !isValidFakeUserID(body.metadata.user_id)) {
-    body.metadata.user_id = getCachedUserID(apiKey, config["cache-user-id"]);
-  }
-
-  // 3. Obfuscate sensitive words in messages
-  const words = config["sensitive-words"];
-  if (words.length) {
-    if (Array.isArray(body.system)) {
-      for (const block of body.system) {
-        if (block.type === "text" && block !== billingEntry && block !== agentEntry) {
-          block.text = obfuscateSensitiveWords(block.text, words);
-        }
-      }
-    }
-    if (Array.isArray(body.messages)) {
-      for (const msg of body.messages) {
-        if (typeof msg.content === "string") {
-          msg.content = obfuscateSensitiveWords(msg.content, words);
-        } else if (Array.isArray(msg.content)) {
-          for (const part of msg.content) {
-            if (part.type === "text") {
-              part.text = obfuscateSensitiveWords(part.text, words);
-            }
-          }
-        }
-      }
-    }
-  }
+  body.metadata.user_id = buildUserId(
+    deviceId,
+    accountUuid,
+    getSessionId(apiKeyHash),
+  );
 
   return body;
 }

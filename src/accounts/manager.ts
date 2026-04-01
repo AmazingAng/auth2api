@@ -1,6 +1,7 @@
 import { TokenData } from "../auth/types";
 import { refreshTokensWithRetry } from "../auth/oauth";
 import { saveToken, loadAllTokens } from "../auth/token-storage";
+import { getDeviceId } from "../proxy/cloak-utils";
 
 const REFRESH_LEAD_MS = 4 * 60 * 60 * 1000; // 4 hours before expiry
 const REFRESH_CHECK_INTERVAL_MS = 60 * 1000; // check every 60s
@@ -56,9 +57,15 @@ export class AccountManager {
   private authDir: string;
   private refreshTimer: NodeJS.Timeout | null = null;
   private refreshing = false;
+  private deviceId: string;
 
   constructor(authDir: string) {
     this.authDir = authDir;
+    this.deviceId = getDeviceId(authDir);
+  }
+
+  getDeviceId(): string {
+    return this.deviceId;
   }
 
   load(): void {
@@ -100,6 +107,11 @@ export class AccountManager {
   getNextAccount(): TokenData | null {
     if (!this.account) return null;
     return this.account.cooldownUntil <= Date.now() ? this.account.token : null;
+  }
+
+  /** Get account UUID for the current account (from OAuth response). */
+  getAccountUuid(): string {
+    return this.account?.token.accountUuid || "";
   }
 
   getAvailability(): AccountAvailability {
