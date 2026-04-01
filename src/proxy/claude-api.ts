@@ -7,7 +7,7 @@ const BASE_URL = "https://api.anthropic.com";
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
  * getAllModelBetas(). Real Claude Code sends different betas per model.
  */
-function buildBetaHeader(model: string): string {
+function buildBetaHeader(model: string, beta?: any): string {
   const betas: string[] = [];
 
   const isHaiku = model.includes("haiku");
@@ -15,6 +15,10 @@ function buildBetaHeader(model: string): string {
   // 1. Non-Haiku models always get the Claude Code beta
   if (!isHaiku) {
     betas.push("claude-code-20250219");
+  }
+
+  if (typeof beta === "string" && beta.includes("context-1m")) {
+    betas.push("context-1m-2025-08-07");
   }
 
   // 2. OAuth users always get this
@@ -32,8 +36,6 @@ function buildBetaHeader(model: string): string {
 
   // 5. Prompt caching scope — always on 1P
   betas.push("prompt-caching-scope-2026-01-05");
-
-  betas.push("advanced-tool-use-2025-11-20");
 
   betas.push("advanced-tool-use-2025-11-20");
 
@@ -129,7 +131,6 @@ function buildHeaders(
     "X-Stainless-Retry-Count": "0",
     Accept: stream ? "text/event-stream" : "application/json",
     // Lowercase headers
-    "anthropic-beta": buildBetaHeader(model),
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
     "x-app": "cli",
@@ -138,8 +139,13 @@ function buildHeaders(
 
   // Override with extra headers (e.g. anthropic-* from claude-cli clients)
   if (extraHeaders) {
-    delete extraHeaders["anthropic-beta"];
     Object.assign(headers, extraHeaders);
+    headers["anthropic-beta"] = buildBetaHeader(
+      model,
+      extraHeaders["anthropic-beta"],
+    );
+  } else {
+    headers["anthropic-beta"] = buildBetaHeader(model);
   }
 
   return headers;
