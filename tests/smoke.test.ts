@@ -321,18 +321,235 @@ test("returns rate limited when the configured account is cooled down", async (t
   assert.equal(resp.body.error.message, "Rate limited on the configured account");
 });
 
-test("rejects loading multiple accounts in single-account mode", (t) => {
+test("loads multiple accounts successfully", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
   });
 
-  saveToken(authDir, makeToken({ email: "first@example.com" }));
+  saveToken(authDir, makeToken({ email: "first@example.com", accessToken: "first-access" }));
   saveToken(authDir, makeToken({ email: "second@example.com", accessToken: "second-access" }));
 
   const manager = new AccountManager(authDir);
-  assert.throws(
-    () => manager.load(),
-    /Single-account mode only supports one token/
-  );
+  manager.load();
+  assert.equal(manager.accountCount, 2);
+});
+
+test("round-robin rotates between multiple accounts", (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  t.after(() => {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+    makeToken({ email: "c@example.com", accessToken: "token-c" }),
+  ]);
+
+  const first = manager.getNextAccount();
+  assert.ok(first);
+  assert.equal(first.token.email, "a@example.com");
+
+  const second = manager.getNextAccount();
+  assert.ok(second);
+  assert.equal(second.token.email, "b@example.com");
+
+  const third = manager.getNextAccount();
+  assert.ok(third);
+  assert.equal(third.token.email, "c@example.com");
+
+  // wraps around
+  const fourth = manager.getNextAccount();
+  assert.ok(fourth);
+  assert.equal(fourth.token.email, "a@example.com");
+});
+
+test("round-robin skips cooled-down accounts", (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  t.after(() => {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+    makeToken({ email: "c@example.com", accessToken: "token-c" }),
+  ]);
+
+  // Cool down account a
+  manager.recordFailure("a@example.com", "rate_limit", "test");
+
+  // Should skip a, get b
+  const first = manager.getNextAccount();
+  assert.ok(first);
+  assert.equal(first.token.email, "b@example.com");
+
+  // Next should be c
+  const second = manager.getNextAccount();
+  assert.ok(second);
+  assert.equal(second.token.email, "c@example.com");
+
+  // Next should skip a again, get b
+  const third = manager.getNextAccount();
+  assert.ok(third);
+  assert.equal(third.token.email, "b@example.com");
+});
+
+test("returns null when all accounts are cooled down", (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  t.after(() => {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+
+  manager.recordFailure("a@example.com", "rate_limit", "test");
+  manager.recordFailure("b@example.com", "rate_limit", "test");
+
+  const result = manager.getNextAccount();
+  assert.equal(result, null);
+
+  const availability = manager.getAvailability();
+  assert.equal(availability.state, "cooldown");
+});
+
+test("multi-account admin endpoint shows all accounts", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { "x-api-key": "test-key" },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(resp.body.account_count, 2);
+  const emails = resp.body.accounts.map((a: any) => a.email).sort();
+  assert.deepEqual(emails, ["a@example.com", "b@example.com"]);
+});
+
+test("multi-account proxies requests using round-robin accounts", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+
+  const usedTokens: string[] = [];
+  const restoreFetch = withMockedFetch(async (_input, init) => {
+    const authHeader = (init?.headers as Record<string, string>).Authorization;
+    usedTokens.push(authHeader.replace("Bearer ", ""));
+
+    return new Response(
+      JSON.stringify({
+        id: "msg_1",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  // First request
+  await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "1" }], stream: false },
+  });
+
+  // Second request
+  await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "2" }], stream: false },
+  });
+
+  // Third request (wraps around)
+  await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "3" }], stream: false },
+  });
+
+  assert.deepEqual(usedTokens, ["token-a", "token-b", "token-a"]);
+});
+
+test("multi-account falls back to next account on rate limit", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+
+  const usedTokens: string[] = [];
+  const restoreFetch = withMockedFetch(async (_input, init) => {
+    const authHeader = (init?.headers as Record<string, string>).Authorization;
+    const token = authHeader.replace("Bearer ", "");
+    usedTokens.push(token);
+
+    if (token === "token-a") {
+      return new Response("rate limited", { status: 429 });
+    }
+    return new Response(
+      JSON.stringify({
+        id: "msg_1",
+        content: [{ type: "text", text: "from b" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "hi" }], stream: false },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(resp.body.choices[0].message.content, "from b");
+  // First attempt used token-a (got 429), retry used token-b (success)
+  assert.equal(usedTokens[0], "token-a");
+  assert.ok(usedTokens.includes("token-b"));
 });

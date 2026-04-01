@@ -1,8 +1,9 @@
+import crypto from "crypto";
 import { Request, Response as ExpressResponse } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { extractApiKey } from "../api-key";
 import { Config, isDebugLevel } from "../config";
-import { AccountFailureKind, AccountManager } from "../accounts/manager";
+import { AccountFailureKind, AccountManager, AccountSelection } from "../accounts/manager";
 import { applyCloaking } from "./cloaking";
 import { callClaudeAPI } from "./claude-api";
 import { resolveModel } from "./translator";
@@ -449,11 +450,10 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const userAgent = req.headers["user-agent"] || "";
       const apiKey = extractApiKey(req.headers);
+      const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
 
-      let claudeBody = responsesToClaude(body);
-      claudeBody = applyCloaking(claudeBody, config.cloaking, userAgent, apiKey);
+      const translatedBody = responsesToClaude(body);
 
       let lastStatus = 500;
       const refreshedAccounts = new Set<string>();
@@ -469,13 +469,22 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
           return;
         }
 
-        manager.recordAttempt(account.email);
+        manager.recordAttempt(account.token.email);
+
+        // Apply per-account cloaking (clone body so each attempt is fresh)
+        const claudeBody = applyCloaking(
+          JSON.parse(JSON.stringify(translatedBody)),
+          account.deviceId,
+          account.accountUuid,
+          apiKeyHash,
+          config.cloaking,
+        );
 
         let upstreamResp: globalThis.Response;
         try {
-          upstreamResp = await callClaudeAPI(account.accessToken, claudeBody, stream, config.timeouts);
+          upstreamResp = await callClaudeAPI(account.token.accessToken, claudeBody, stream, config.timeouts, config.cloaking, apiKeyHash);
         } catch (err: any) {
-          manager.recordFailure(account.email, "network", err.message);
+          manager.recordFailure(account.token.email, "network", err.message);
           if (isDebugLevel(config.debug, "errors")) {
             console.error(`Responses attempt ${attempt + 1} network failure: ${err.message}`);
           }
@@ -531,11 +540,11 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
                 }
               }
               if (!clientDisconnected) {
-                manager.recordSuccess(account.email);
+                manager.recordSuccess(account.token.email);
               }
             } catch (err) {
               if (!clientDisconnected) {
-                manager.recordFailure(account.email, "network", "stream terminated before completion");
+                manager.recordFailure(account.token.email, "network", "stream terminated before completion");
               }
               if (!clientDisconnected) console.error("Responses stream error:", err);
             } finally {
@@ -543,7 +552,7 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
             }
           } else {
             const claudeResp = await upstreamResp.json();
-            manager.recordSuccess(account.email);
+            manager.recordSuccess(account.token.email);
             res.json(claudeToResponses(claudeResp, model));
           }
           return;
@@ -556,14 +565,14 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
         }
 
         if (lastStatus === 401) {
-          const refreshed = await manager.refreshAccount(account.email);
-          if (refreshed && !refreshedAccounts.has(account.email)) {
-            refreshedAccounts.add(account.email);
+          const refreshed = await manager.refreshAccount(account.token.email);
+          if (refreshed && !refreshedAccounts.has(account.token.email)) {
+            refreshedAccounts.add(account.token.email);
             attempt--;
             continue;
           }
         } else {
-          manager.recordFailure(account.email, classifyFailure(lastStatus));
+          manager.recordFailure(account.token.email, classifyFailure(lastStatus));
         }
         if (!RETRYABLE_STATUSES.has(lastStatus)) break;
         if (attempt < MAX_RETRIES - 1) {

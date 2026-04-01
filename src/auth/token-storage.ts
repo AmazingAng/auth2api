@@ -10,6 +10,7 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     email: data.email,
     type: "claude",
     expired: data.expiresAt,
+    account_uuid: data.accountUuid,
   };
 }
 
@@ -19,6 +20,7 @@ export function storageToToken(storage: TokenStorage): TokenData {
     refreshToken: storage.refresh_token,
     email: storage.email,
     expiresAt: storage.expired,
+    accountUuid: storage.account_uuid || "",
   };
 }
 

@@ -11,13 +11,6 @@ api-keys:
 # Maximum JSON request body size
 body-limit: "200mb"
 
-# Cloaking settings (masquerade as Claude Code CLI)
-cloaking:
-  mode: "auto"          # auto | always | never
-  strict-mode: false    # true = only billing header + agent block in system prompt
-  sensitive-words: []   # words to obfuscate with zero-width spaces
-  cache-user-id: false  # cache fake user ID per API key
-
 # Upstream request timeouts
 timeouts:
   messages-ms: 120000         # non-stream /v1/messages timeout
@@ -29,3 +22,14 @@ timeouts:
 # errors = upstream/network failure details
 # verbose = errors + per-request access logs
 debug: "off"
+
+# Request fingerprinting — controls how auth2api mimics Claude Code CLI
+# These settings affect the User-Agent, billing header, and fingerprint
+cloaking:
+  # CLI version to impersonate (default: 2.1.88)
+  # This affects User-Agent and the fingerprint in billing-header
+  cli-version: "2.1.88"
+
+  # Entrypoint for billing attribution (default: cli)
+  # Claude Code uses: cli, mcp, sdk, etc.
+  entrypoint: "cli"

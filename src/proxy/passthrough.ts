@@ -1,7 +1,8 @@
+import crypto from "crypto";
 import { Request, Response as ExpressResponse } from "express";
 import { extractApiKey } from "../api-key";
 import { Config, isDebugLevel } from "../config";
-import { AccountFailureKind, AccountManager } from "../accounts/manager";
+import { AccountFailureKind, AccountManager, AccountSelection } from "../accounts/manager";
 import { applyCloaking } from "./cloaking";
 import { callClaudeAPI, callClaudeCountTokens } from "./claude-api";
 
@@ -20,17 +21,34 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
   return async (req: Request, res: ExpressResponse): Promise<void> => {
     try {
       const body = req.body;
-      if (!body.messages) {
-        res.status(400).json({ error: { type: "invalid_request_error", message: "messages is required" } });
+      if (
+        !body.messages ||
+        !Array.isArray(body.messages) ||
+        body.messages.length === 0
+      ) {
+        res
+          .status(400)
+          .json({
+            error: {
+              type: "invalid_request_error",
+              message: "messages is required and must be a non-empty array",
+            },
+          });
         return;
       }
 
-      const stream = !!body.stream;
-      const userAgent = req.headers["user-agent"] || "";
-      const apiKey = extractApiKey(req.headers);
+      // Debug: log incoming request body
+      if (isDebugLevel(config.debug, "verbose")) {
+        console.log("[DEBUG] Incoming /v1/messages body:");
+        console.log(JSON.stringify(body, null, 2));
+      }
 
-      // Apply cloaking (system prompt injection, user ID, etc.)
-      const claudeBody = applyCloaking({ ...body }, config.cloaking, userAgent, apiKey);
+      const stream = !!body.stream;
+      const apiKey = extractApiKey(req.headers);
+      const apiKeyHash = crypto
+        .createHash("sha256")
+        .update(apiKey)
+        .digest("hex");
 
       let lastStatus = 500;
       const refreshedAccounts = new Set<string>();
@@ -39,28 +57,67 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
         if (!account) {
           const availability = manager.getAvailability();
           if (availability.state === "cooldown") {
-            res.status(429).json({ error: { type: "api_error", message: "Rate limited on the configured account" } });
+            res
+              .status(429)
+              .json({
+                error: {
+                  type: "api_error",
+                  message: "Rate limited on the configured account",
+                },
+              });
           } else {
-            res.status(503).json({ error: { type: "api_error", message: "No available account" } });
+            res
+              .status(503)
+              .json({
+                error: { type: "api_error", message: "No available account" },
+              });
           }
           return;
         }
 
-        manager.recordAttempt(account.email);
+        manager.recordAttempt(account.token.email);
+
+        // Apply per-account cloaking (clone body so each attempt is fresh)
+        const claudeBody = applyCloaking(
+          JSON.parse(JSON.stringify(body)),
+          account.deviceId,
+          account.accountUuid,
+          apiKeyHash,
+          config.cloaking,
+        );
+
+        // Debug: log final request body after cloaking
+        if (isDebugLevel(config.debug, "verbose")) {
+          console.log("[DEBUG] Final /v1/messages body after cloaking:");
+          console.log(JSON.stringify(claudeBody, null, 2));
+        }
 
         let upstreamResp: globalThis.Response;
         try {
-          upstreamResp = await callClaudeAPI(account.accessToken, claudeBody, stream, config.timeouts);
+          upstreamResp = await callClaudeAPI(
+            account.token.accessToken,
+            claudeBody,
+            stream,
+            config.timeouts,
+            config.cloaking,
+            apiKeyHash,
+          );
         } catch (err: any) {
-          manager.recordFailure(account.email, "network", err.message);
+          manager.recordFailure(account.token.email, "network", err.message);
           if (isDebugLevel(config.debug, "errors")) {
-            console.error(`Messages attempt ${attempt + 1} network failure: ${err.message}`);
+            console.error(
+              `Messages attempt ${attempt + 1} network failure: ${err.message}`,
+            );
           }
           if (attempt < MAX_RETRIES - 1) {
             await new Promise((r) => setTimeout(r, (attempt + 1) * 1000));
             continue;
           }
-          res.status(502).json({ error: { type: "api_error", message: "Upstream network error" } });
+          res
+            .status(502)
+            .json({
+              error: { type: "api_error", message: "Upstream network error" },
+            });
           return;
         }
 
@@ -74,7 +131,10 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             res.flushHeaders();
 
             const reader = upstreamResp.body?.getReader();
-            if (!reader) { res.end(); return; }
+            if (!reader) {
+              res.end();
+              return;
+            }
 
             let clientDisconnected = false;
             res.on("close", () => {
@@ -89,11 +149,15 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
                 res.write(Buffer.from(value));
               }
               if (!clientDisconnected) {
-                manager.recordSuccess(account.email);
+                manager.recordSuccess(account.token.email);
               }
             } catch (err) {
               if (!clientDisconnected) {
-                manager.recordFailure(account.email, "network", "stream terminated before completion");
+                manager.recordFailure(
+                  account.token.email,
+                  "network",
+                  "stream terminated before completion",
+                );
               }
               if (!clientDisconnected) console.error("Stream pipe error:", err);
             } finally {
@@ -102,7 +166,7 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
           } else {
             // Forward JSON response directly
             const data = await upstreamResp.json();
-            manager.recordSuccess(account.email);
+            manager.recordSuccess(account.token.email);
             res.json(data);
           }
           return;
@@ -112,19 +176,23 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
         try {
           const errText = await upstreamResp.text();
           if (isDebugLevel(config.debug, "errors")) {
-            console.error(`Messages attempt ${attempt + 1} failed (${lastStatus}): ${errText}`);
+            console.error(
+              `Messages attempt ${attempt + 1} failed (${lastStatus}): ${errText}`,
+            );
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
 
         if (lastStatus === 401) {
-          const refreshed = await manager.refreshAccount(account.email);
-          if (refreshed && !refreshedAccounts.has(account.email)) {
-            refreshedAccounts.add(account.email);
+          const refreshed = await manager.refreshAccount(account.token.email);
+          if (refreshed && !refreshedAccounts.has(account.token.email)) {
+            refreshedAccounts.add(account.token.email);
             attempt--;
             continue;
           }
         } else {
-          manager.recordFailure(account.email, classifyFailure(lastStatus));
+          manager.recordFailure(account.token.email, classifyFailure(lastStatus));
         }
         if (!RETRYABLE_STATUSES.has(lastStatus)) break;
         if (attempt < MAX_RETRIES - 1) {
@@ -132,19 +200,37 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
         }
       }
 
-      const clientMsg = lastStatus === 429 ? "Rate limited on the configured account" : "Upstream request failed";
-      res.status(lastStatus).json({ error: { type: "api_error", message: clientMsg } });
+      const clientMsg =
+        lastStatus === 429
+          ? "Rate limited on the configured account"
+          : "Upstream request failed";
+      res
+        .status(lastStatus)
+        .json({ error: { type: "api_error", message: clientMsg } });
     } catch (err: any) {
       console.error("Messages handler error:", err.message);
-      res.status(500).json({ error: { type: "api_error", message: "Internal server error" } });
+      res
+        .status(500)
+        .json({
+          error: { type: "api_error", message: "Internal server error" },
+        });
     }
   };
 }
 
 // POST /v1/messages/count_tokens — passthrough
-export function createCountTokensHandler(config: Config, manager: AccountManager) {
+export function createCountTokensHandler(
+  config: Config,
+  manager: AccountManager,
+) {
   return async (req: Request, res: ExpressResponse): Promise<void> => {
     try {
+      const apiKey = extractApiKey(req.headers);
+      const apiKeyHash = crypto
+        .createHash("sha256")
+        .update(apiKey)
+        .digest("hex");
+
       let lastStatus = 500;
       const refreshedAccounts = new Set<string>();
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -152,33 +238,56 @@ export function createCountTokensHandler(config: Config, manager: AccountManager
         if (!account) {
           const availability = manager.getAvailability();
           if (availability.state === "cooldown") {
-            res.status(429).json({ error: { type: "api_error", message: "Rate limited on the configured account" } });
+            res
+              .status(429)
+              .json({
+                error: {
+                  type: "api_error",
+                  message: "Rate limited on the configured account",
+                },
+              });
           } else {
-            res.status(503).json({ error: { type: "api_error", message: "No available account" } });
+            res
+              .status(503)
+              .json({
+                error: { type: "api_error", message: "No available account" },
+              });
           }
           return;
         }
 
-        manager.recordAttempt(account.email);
+        manager.recordAttempt(account.token.email);
 
         let upstreamResp: globalThis.Response;
         try {
-          upstreamResp = await callClaudeCountTokens(account.accessToken, req.body, config.timeouts);
+          upstreamResp = await callClaudeCountTokens(
+            account.token.accessToken,
+            req.body,
+            config.timeouts,
+            config.cloaking,
+            apiKeyHash,
+          );
         } catch (err: any) {
-          manager.recordFailure(account.email, "network", err.message);
+          manager.recordFailure(account.token.email, "network", err.message);
           if (isDebugLevel(config.debug, "errors")) {
-            console.error(`Count tokens attempt ${attempt + 1} network failure: ${err.message}`);
+            console.error(
+              `Count tokens attempt ${attempt + 1} network failure: ${err.message}`,
+            );
           }
           if (attempt < MAX_RETRIES - 1) {
             await new Promise((r) => setTimeout(r, (attempt + 1) * 1000));
             continue;
           }
-          res.status(502).json({ error: { type: "api_error", message: "Upstream network error" } });
+          res
+            .status(502)
+            .json({
+              error: { type: "api_error", message: "Upstream network error" },
+            });
           return;
         }
 
         if (upstreamResp.ok) {
-          manager.recordSuccess(account.email);
+          manager.recordSuccess(account.token.email);
           const data = await upstreamResp.json();
           res.json(data);
           return;
@@ -186,14 +295,14 @@ export function createCountTokensHandler(config: Config, manager: AccountManager
 
         lastStatus = upstreamResp.status;
         if (lastStatus === 401) {
-          const refreshed = await manager.refreshAccount(account.email);
-          if (refreshed && !refreshedAccounts.has(account.email)) {
-            refreshedAccounts.add(account.email);
+          const refreshed = await manager.refreshAccount(account.token.email);
+          if (refreshed && !refreshedAccounts.has(account.token.email)) {
+            refreshedAccounts.add(account.token.email);
             attempt--;
             continue;
           }
         } else {
-          manager.recordFailure(account.email, classifyFailure(lastStatus));
+          manager.recordFailure(account.token.email, classifyFailure(lastStatus));
         }
 
         if (!RETRYABLE_STATUSES.has(lastStatus)) break;
@@ -202,10 +311,18 @@ export function createCountTokensHandler(config: Config, manager: AccountManager
         }
       }
 
-      res.status(lastStatus).json({ error: { type: "api_error", message: "Token counting failed" } });
+      res
+        .status(lastStatus)
+        .json({
+          error: { type: "api_error", message: "Token counting failed" },
+        });
     } catch (err: any) {
       console.error("Count tokens error:", err.message);
-      res.status(500).json({ error: { type: "api_error", message: "Internal server error" } });
+      res
+        .status(500)
+        .json({
+          error: { type: "api_error", message: "Internal server error" },
+        });
     }
   };
 }

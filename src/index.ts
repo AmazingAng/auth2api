@@ -74,7 +74,7 @@ async function startServer(): Promise<void> {
   manager.load();
 
   if (manager.accountCount === 0) {
-    console.log("No account found. Run with --login to add your account first.");
+    console.log("No accounts found. Run with --login to add an account first.");
     process.exit(1);
   }
 

@@ -59,6 +59,7 @@ export async function exchangeCodeForTokens(
     refreshToken: data.refresh_token,
     email: data.account?.email_address || "unknown",
     expiresAt,
+    accountUuid: data.account?.uuid || "",
   };
 }
 
@@ -86,6 +87,7 @@ export async function refreshTokens(refreshToken: string): Promise<TokenData> {
     refreshToken: data.refresh_token,
     email: data.account?.email_address || "unknown",
     expiresAt,
+    accountUuid: data.account?.uuid || "",
   };
 }
 

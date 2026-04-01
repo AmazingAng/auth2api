@@ -8,6 +8,7 @@ export interface TokenData {
   refreshToken: string;
   email: string;
   expiresAt: string; // ISO 8601
+  accountUuid: string; // from OAuth token response: data.account.uuid
 }
 
 export interface TokenStorage {
@@ -17,4 +18,5 @@ export interface TokenStorage {
   email: string;
   type: "claude";
   expired: string; // ISO 8601
+  account_uuid?: string;
 }
