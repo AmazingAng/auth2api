@@ -335,7 +335,7 @@ test("loads multiple accounts successfully", (t) => {
   assert.equal(manager.accountCount, 2);
 });
 
-test("round-robin rotates between multiple accounts", (t) => {
+test("sticky selection keeps using the same available account", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -349,23 +349,21 @@ test("round-robin rotates between multiple accounts", (t) => {
 
   const first = manager.getNextAccount();
   assert.ok(first);
-  assert.equal(first.token.email, "a@example.com");
+  assert.ok(first.account);
+  assert.equal(first.account.token.email, "a@example.com");
 
   const second = manager.getNextAccount();
   assert.ok(second);
-  assert.equal(second.token.email, "b@example.com");
+  assert.ok(second.account);
+  assert.equal(second.account.token.email, "a@example.com");
 
   const third = manager.getNextAccount();
   assert.ok(third);
-  assert.equal(third.token.email, "c@example.com");
-
-  // wraps around
-  const fourth = manager.getNextAccount();
-  assert.ok(fourth);
-  assert.equal(fourth.token.email, "a@example.com");
+  assert.ok(third.account);
+  assert.equal(third.account.token.email, "a@example.com");
 });
 
-test("round-robin skips cooled-down accounts", (t) => {
+test("sticky selection switches when the current account is cooled down", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -377,26 +375,22 @@ test("round-robin skips cooled-down accounts", (t) => {
     makeToken({ email: "c@example.com", accessToken: "token-c" }),
   ]);
 
-  // Cool down account a
+  const first = manager.getNextAccount();
+  assert.ok(first.account);
+  assert.equal(first.account.token.email, "a@example.com");
+
   manager.recordFailure("a@example.com", "rate_limit", "test");
 
-  // Should skip a, get b
-  const first = manager.getNextAccount();
-  assert.ok(first);
-  assert.equal(first.token.email, "b@example.com");
-
-  // Next should be c
   const second = manager.getNextAccount();
-  assert.ok(second);
-  assert.equal(second.token.email, "c@example.com");
+  assert.ok(second.account);
+  assert.equal(second.account.token.email, "b@example.com");
 
-  // Next should skip a again, get b
   const third = manager.getNextAccount();
-  assert.ok(third);
-  assert.equal(third.token.email, "b@example.com");
+  assert.ok(third.account);
+  assert.equal(third.account.token.email, "b@example.com");
 });
 
-test("returns null when all accounts are cooled down", (t) => {
+test("returns a null account result when all accounts are cooled down", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -411,10 +405,8 @@ test("returns null when all accounts are cooled down", (t) => {
   manager.recordFailure("b@example.com", "rate_limit", "test");
 
   const result = manager.getNextAccount();
-  assert.equal(result, null);
-
-  const availability = manager.getAvailability();
-  assert.equal(availability.state, "cooldown");
+  assert.equal(result.account, null);
+  assert.equal(result.total, 2);
 });
 
 test("multi-account admin endpoint shows all accounts", async (t) => {
@@ -443,7 +435,7 @@ test("multi-account admin endpoint shows all accounts", async (t) => {
   assert.deepEqual(emails, ["a@example.com", "b@example.com"]);
 });
 
-test("multi-account proxies requests using round-robin accounts", async (t) => {
+test("multi-account proxies requests using the sticky account until failover", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   const manager = makeManager(authDir, [
     makeToken({ email: "a@example.com", accessToken: "token-a" }),
@@ -501,7 +493,7 @@ test("multi-account proxies requests using round-robin accounts", async (t) => {
     body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "3" }], stream: false },
   });
 
-  assert.deepEqual(usedTokens, ["token-a", "token-b", "token-a"]);
+  assert.deepEqual(usedTokens, ["token-a", "token-a", "token-a"]);
 });
 
 test("multi-account falls back to next account on rate limit", async (t) => {
