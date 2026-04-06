@@ -7,6 +7,7 @@ import { AccountFailureKind, AccountManager } from "../accounts/manager";
 import { applyCloaking } from "./cloaking";
 import { callClaudeAPI } from "./claude-api";
 import { resolveModel } from "./translator";
+import { sendAccountUnavailable } from "./account-unavailable";
 
 const MAX_RETRIES = 3;
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -589,14 +590,10 @@ export function createResponsesHandler(
       let lastErrBody = "";
       const refreshedAccounts = new Set<string>();
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        const { account, total } = manager.getNextAccount();
+        const accountResult = manager.getNextAccount();
+        const { account } = accountResult;
         if (!account) {
-          const status = total === 0 ? 503 : 429;
-          const message =
-            total === 0
-              ? "No available account"
-              : "Rate limited on the configured account";
-          res.status(status).json({ error: { message } });
+          sendAccountUnavailable(res, accountResult);
           return;
         }
 

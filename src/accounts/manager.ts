@@ -13,6 +13,8 @@ export type AccountFailureKind =
   | "server"
   | "network";
 
+export type AccountUnavailableReason = AccountFailureKind;
+
 const FAILURE_BACKOFF: Record<
   AccountFailureKind,
   { baseMs: number; maxMs: number }
@@ -28,6 +30,7 @@ interface AccountState {
   token: TokenData;
   cooldownUntil: number;
   failureCount: number;
+  lastFailureKind: AccountFailureKind | null;
   lastError: string | null;
   lastFailureAt: string | null;
   lastSuccessAt: string | null;
@@ -44,6 +47,7 @@ export interface AccountSnapshot {
   available: boolean;
   cooldownUntil: number;
   failureCount: number;
+  lastFailureKind: AccountFailureKind | null;
   lastError: string | null;
   lastFailureAt: string | null;
   lastSuccessAt: string | null;
@@ -55,20 +59,69 @@ export interface AccountSnapshot {
   refreshing: boolean;
 }
 
-export interface AccountResult {
-  account: {
-    token: TokenData;
-    deviceId: string;
-    accountUuid: string;
-  } | null;
-  total: number;
+interface AvailableAccount {
+  token: TokenData;
+  deviceId: string;
+  accountUuid: string;
 }
+
+export type AccountResult =
+  | {
+      account: AvailableAccount;
+      total: number;
+      unavailableReason: "none";
+      retryAfterMs: null;
+      lastError: null;
+    }
+  | {
+      account: null;
+      total: 0;
+      unavailableReason: "none";
+      retryAfterMs: null;
+      lastError: null;
+    }
+  | {
+      account: null;
+      total: number;
+      unavailableReason: AccountUnavailableReason;
+      retryAfterMs: number | null;
+      lastError: string | null;
+    };
 
 const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
 const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
 
 function randomStickyDuration(): number {
   return STICKY_MIN_MS + Math.random() * (STICKY_MAX_MS - STICKY_MIN_MS);
+}
+
+const RECOVERABLE_REASON_PRIORITY: Record<
+  Exclude<AccountFailureKind, "auth" | "forbidden">,
+  number
+> = {
+  rate_limit: 3,
+  server: 2,
+  network: 1,
+};
+
+const TERMINAL_REASON_PRIORITY: Record<
+  Extract<AccountFailureKind, "auth" | "forbidden">,
+  number
+> = {
+  auth: 5,
+  forbidden: 4,
+};
+
+function buildAvailableAccount(
+  authDir: string,
+  email: string,
+  token: TokenData,
+): AvailableAccount {
+  return {
+    token,
+    deviceId: getDeviceId(authDir, email),
+    accountUuid: token.accountUuid,
+  };
 }
 
 export class AccountManager {
@@ -99,6 +152,7 @@ export class AccountManager {
       existing.token = token;
       existing.cooldownUntil = 0;
       existing.failureCount = 0;
+      existing.lastFailureKind = null;
       existing.lastError = null;
       existing.lastFailureAt = null;
       existing.lastSuccessAt = new Date().toISOString();
@@ -121,7 +175,15 @@ export class AccountManager {
    */
   getNextAccount(): AccountResult {
     const count = this.accountOrder.length;
-    if (count === 0) return { account: null, total: 0 };
+    if (count === 0) {
+      return {
+        account: null,
+        total: 0,
+        unavailableReason: "none",
+        retryAfterMs: null,
+        lastError: null,
+      };
+    }
 
     const now = Date.now();
 
@@ -131,12 +193,11 @@ export class AccountManager {
       const acct = this.accounts.get(email)!;
       if (acct.cooldownUntil <= now) {
         return {
-          account: {
-            token: acct.token,
-            deviceId: getDeviceId(this.authDir, email),
-            accountUuid: acct.token.accountUuid,
-          },
+          account: buildAvailableAccount(this.authDir, email, acct.token),
           total: count,
+          unavailableReason: "none",
+          retryAfterMs: null,
+          lastError: null,
         };
       }
     }
@@ -151,16 +212,78 @@ export class AccountManager {
         this.lastUsedIndex = idx;
         this.stickyUntil = now + randomStickyDuration();
         return {
-          account: {
-            token: acct.token,
-            deviceId: getDeviceId(this.authDir, email),
-            accountUuid: acct.token.accountUuid,
-          },
+          account: buildAvailableAccount(this.authDir, email, acct.token),
           total: count,
+          unavailableReason: "none",
+          retryAfterMs: null,
+          lastError: null,
         };
       }
     }
-    return { account: null, total: count };
+
+    const recoverableStates: Array<{
+      reason: Exclude<AccountFailureKind, "auth" | "forbidden">;
+      remainingMs: number;
+      lastError: string | null;
+    }> = [];
+    const terminalStates: Array<{
+      reason: Extract<AccountFailureKind, "auth" | "forbidden">;
+      remainingMs: number;
+      lastError: string | null;
+    }> = [];
+
+    for (const email of this.accountOrder) {
+      const acct = this.accounts.get(email)!;
+      const reason = acct.lastFailureKind ?? "network";
+      const remainingMs = Math.max(0, acct.cooldownUntil - now);
+      if (reason === "auth" || reason === "forbidden") {
+        terminalStates.push({
+          reason,
+          remainingMs,
+          lastError: acct.lastError,
+        });
+      } else {
+        recoverableStates.push({
+          reason,
+          remainingMs,
+          lastError: acct.lastError,
+        });
+      }
+    }
+
+    if (recoverableStates.length > 0) {
+      const best = recoverableStates.reduce((currentBest, candidate) => {
+        if (candidate.remainingMs < currentBest.remainingMs) return candidate;
+        if (candidate.remainingMs > currentBest.remainingMs) return currentBest;
+        return RECOVERABLE_REASON_PRIORITY[candidate.reason] >
+          RECOVERABLE_REASON_PRIORITY[currentBest.reason]
+          ? candidate
+          : currentBest;
+      });
+
+      return {
+        account: null,
+        total: count,
+        unavailableReason: best.reason,
+        retryAfterMs: best.remainingMs,
+        lastError: best.lastError,
+      };
+    }
+
+    const bestTerminal = terminalStates.reduce((currentBest, candidate) =>
+      TERMINAL_REASON_PRIORITY[candidate.reason] >
+      TERMINAL_REASON_PRIORITY[currentBest.reason]
+        ? candidate
+        : currentBest,
+    );
+
+    return {
+      account: null,
+      total: count,
+      unavailableReason: bestTerminal.reason,
+      retryAfterMs: null,
+      lastError: bestTerminal.lastError,
+    };
   }
 
   recordAttempt(email: string): void {
@@ -176,6 +299,7 @@ export class AccountManager {
 
     acct.cooldownUntil = 0;
     acct.failureCount = 0;
+    acct.lastFailureKind = null;
     acct.lastError = null;
     acct.lastFailureAt = null;
     acct.lastSuccessAt = new Date().toISOString();
@@ -192,6 +316,7 @@ export class AccountManager {
 
     acct.failureCount++;
     acct.totalFailures++;
+    acct.lastFailureKind = kind;
     acct.lastFailureAt = new Date().toISOString();
     acct.lastError = detail ? `${kind}: ${detail}` : kind;
 
@@ -226,6 +351,7 @@ export class AccountManager {
         available: acct.cooldownUntil <= now,
         cooldownUntil: acct.cooldownUntil,
         failureCount: acct.failureCount,
+        lastFailureKind: acct.lastFailureKind,
         lastError: acct.lastError,
         lastFailureAt: acct.lastFailureAt,
         lastSuccessAt: acct.lastSuccessAt,
@@ -293,6 +419,7 @@ export class AccountManager {
       acct.token = newToken;
       acct.cooldownUntil = 0;
       acct.failureCount = 0;
+      acct.lastFailureKind = null;
       acct.lastError = null;
       acct.lastFailureAt = null;
       acct.lastSuccessAt = new Date().toISOString();
@@ -317,6 +444,7 @@ export class AccountManager {
       token,
       cooldownUntil: 0,
       failureCount: 0,
+      lastFailureKind: null,
       lastError: null,
       lastFailureAt: null,
       lastSuccessAt: null,

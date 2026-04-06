@@ -104,6 +104,7 @@ async function requestJson(options: {
           resolve({
             status: res.statusCode || 0,
             body: data ? JSON.parse(data) : null,
+            headers: res.headers,
           });
         });
       }
@@ -319,6 +320,136 @@ test("returns rate limited when the configured account is cooled down", async (t
 
   assert.equal(resp.status, 429);
   assert.equal(resp.body.error.message, "Rate limited on the configured account");
+  assert.equal(typeof resp.headers["retry-after"], "string");
+});
+
+test("returns service unavailable when the configured account requires re-authentication", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "auth", "forced for smoke test");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("Upstream should not be called while the configured account is unavailable");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hello" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(
+    resp.body.error.message,
+    "Configured account requires re-authentication",
+  );
+});
+
+test("returns service unavailable when all accounts are cooled down by server failures", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "server", "forced for smoke test");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("Upstream should not be called while the configured account is unavailable");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hello" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(
+    resp.body.error.message,
+    "Upstream server temporarily unavailable",
+  );
+});
+
+test("returns service unavailable when the configured account is forbidden", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "forbidden", "forced for smoke test");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("Upstream should not be called while the configured account is unavailable");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hello" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(resp.body.error.message, "Configured account is forbidden");
+});
+
+test("returns service unavailable when the configured account has a network cooldown", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "network", "forced for smoke test");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("Upstream should not be called while the configured account is unavailable");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hello" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(
+    resp.body.error.message,
+    "Upstream network temporarily unavailable",
+  );
 });
 
 test("loads multiple accounts successfully", (t) => {
@@ -407,6 +538,54 @@ test("returns a null account result when all accounts are cooled down", (t) => {
   const result = manager.getNextAccount();
   assert.equal(result.account, null);
   assert.equal(result.total, 2);
+  assert.equal(result.unavailableReason, "rate_limit");
+  assert.ok((result.retryAfterMs ?? 0) > 0);
+});
+
+test("prefers the fastest recoverable unavailable reason over auth-only failures", (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  t.after(() => {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+
+  manager.recordFailure("a@example.com", "auth", "test");
+  manager.recordFailure("b@example.com", "rate_limit", "test");
+
+  const result = manager.getNextAccount();
+  assert.equal(result.account, null);
+  assert.equal(result.unavailableReason, "rate_limit");
+  assert.ok((result.retryAfterMs ?? 0) > 0);
+});
+
+test("uses the shortest retry-after among accounts with the same recoverable reason", (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  t.after(() => {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+
+  manager.recordFailure("a@example.com", "rate_limit", "test");
+  manager.recordFailure("b@example.com", "rate_limit", "test");
+
+  const accounts = (manager as any).accounts as Map<string, { cooldownUntil: number }>;
+  const now = Date.now();
+  accounts.get("a@example.com")!.cooldownUntil = now + 5000;
+  accounts.get("b@example.com")!.cooldownUntil = now + 12000;
+
+  const result = manager.getNextAccount();
+  assert.equal(result.account, null);
+  assert.equal(result.unavailableReason, "rate_limit");
+  assert.ok((result.retryAfterMs ?? 0) <= 5500);
+  assert.ok((result.retryAfterMs ?? 0) >= 4000);
 });
 
 test("multi-account admin endpoint shows all accounts", async (t) => {
