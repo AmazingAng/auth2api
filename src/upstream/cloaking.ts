@@ -1,10 +1,10 @@
 import crypto from "crypto";
 import { CloakingConfig } from "../config";
-import { getSessionId } from "./claude-api";
-
-/** Default values */
-const DEFAULT_CLI_VERSION = "2.1.88";
-const DEFAULT_ENTRYPOINT = "cli";
+import {
+  getSessionId,
+  DEFAULT_CLI_VERSION,
+  DEFAULT_ENTRYPOINT,
+} from "./anthropic-api";
 
 /**
  * Fingerprint algorithm — exact replica of Claude Code's utils/fingerprint.ts

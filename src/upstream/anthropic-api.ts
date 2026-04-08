@@ -73,8 +73,8 @@ export function resetSessionId(apiKeyHash: string): void {
 }
 
 /** Default values */
-const DEFAULT_CLI_VERSION = "2.1.88";
-const DEFAULT_ENTRYPOINT = "cli";
+export const DEFAULT_CLI_VERSION = "2.1.88";
+export const DEFAULT_ENTRYPOINT = "cli";
 
 function buildHeaders(
   accessToken: string,
@@ -128,7 +128,7 @@ function buildHeaders(
   return headers;
 }
 
-export async function callClaudeAPI(
+export async function callAnthropicAPI(
   accessToken: string,
   body: any,
   stream: boolean,
@@ -162,7 +162,7 @@ export async function callClaudeAPI(
   return response;
 }
 
-export async function callClaudeCountTokens(
+export async function callAnthropicCountTokens(
   accessToken: string,
   body: any,
   timeouts: TimeoutConfig,
