@@ -70,23 +70,23 @@ If the configured Claude account is temporarily cooled down after upstream rate 
 Copy `config.example.yaml` to `config.yaml` and edit as needed:
 
 ```yaml
-host: ""          # bind address, empty = 127.0.0.1
+host: "" # bind address, empty = 127.0.0.1
 port: 8317
 
-auth-dir: "~/.auth2api"   # where OAuth tokens are stored
+auth-dir: "~/.auth2api" # where OAuth tokens are stored
 
 api-keys:
-  - "your-api-key-here"   # clients use this to authenticate
+  - "your-api-key-here" # clients use this to authenticate
 
-body-limit: "200mb"       # maximum JSON request body size, useful for large-context usage
+body-limit: "200mb" # maximum JSON request body size, useful for large-context usage
 
 cloaking:
-  mode: "auto"            # auto | always | never
+  mode: "auto" # auto | always | never
   strict-mode: false
   sensitive-words: []
   cache-user-id: false
 
-debug: "off"            # off | errors | verbose
+debug: "off" # off | errors | verbose
 ```
 
 Timeouts can also be configured if you run long Claude Code tasks:
@@ -103,6 +103,7 @@ By default, streaming upstream requests are allowed to run for 10 minutes before
 The default request body limit is `200mb`, which is more suitable for large Claude Code contexts than the previous fixed `20mb`.
 
 `debug` now supports three levels:
+
 - `off`: no extra logs
 - `errors`: log upstream/network failures and upstream error bodies
 - `verbose`: include `errors` logs plus per-request method, path, status, and duration
@@ -124,12 +125,12 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### Available models
 
-| Model ID | Description |
-|----------|-------------|
-| `claude-opus-4-6` | Claude Opus 4.6 |
-| `claude-sonnet-4-6` | Claude Sonnet 4.6 |
-| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 |
-| `claude-haiku-4-5` | Alias for Claude Haiku 4.5 |
+| Model ID                    | Description                |
+| --------------------------- | -------------------------- |
+| `claude-opus-4-6`           | Claude Opus 4.6            |
+| `claude-sonnet-4-6`         | Claude Sonnet 4.6          |
+| `claude-haiku-4-5-20251001` | Claude Haiku 4.5           |
+| `claude-haiku-4-5`          | Alias for Claude Haiku 4.5 |
 
 Short convenience aliases accepted by auth2api:
 
@@ -139,17 +140,29 @@ Short convenience aliases accepted by auth2api:
 
 ### Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | OpenAI-compatible chat |
-| `POST /v1/responses` | OpenAI Responses API compatibility |
-| `POST /v1/messages` | Claude native passthrough |
-| `POST /v1/messages/count_tokens` | Claude token counting |
-| `GET /v1/models` | List available models |
-| `GET /admin/accounts` | Account health/status (API key required) |
-| `GET /health` | Health check |
+| Endpoint                         | Description                              |
+| -------------------------------- | ---------------------------------------- |
+| `POST /v1/chat/completions`      | OpenAI-compatible chat                   |
+| `POST /v1/responses`             | OpenAI Responses API compatibility       |
+| `POST /v1/messages`              | Claude native passthrough                |
+| `POST /v1/messages/count_tokens` | Claude token counting                    |
+| `GET /v1/models`                 | List available models                    |
+| `GET /admin/accounts`            | Account health/status (API key required) |
+| `GET /health`                    | Health check                             |
 
 ## Docker
+
+### Quick start (prebuilt image)
+
+Prebuilt images are published to GitHub Container Registry from the default branch:
+
+```bash
+docker pull ghcr.io/AmazingAng/auth2api:latest
+```
+
+Pull requests only build the image for verification and do not publish packages.
+
+### Build from source
 
 ```bash
 # Build
@@ -163,7 +176,7 @@ docker run -d \
   auth2api
 ```
 
-Or with docker-compose:
+Or use docker-compose:
 
 ```bash
 docker-compose up -d
