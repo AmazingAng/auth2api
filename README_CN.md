@@ -70,23 +70,23 @@ node dist/index.js
 复制 `config.example.yaml` 为 `config.yaml`，然后按需修改：
 
 ```yaml
-host: ""          # 绑定地址，空字符串表示 127.0.0.1
+host: "" # 绑定地址，空字符串表示 127.0.0.1
 port: 8317
 
-auth-dir: "~/.auth2api"   # OAuth token 存储目录
+auth-dir: "~/.auth2api" # OAuth token 存储目录
 
 api-keys:
-  - "your-api-key-here"   # 客户端使用这个 key 访问代理
+  - "your-api-key-here" # 客户端使用这个 key 访问代理
 
-body-limit: "200mb"       # 最大 JSON 请求体大小，适合大上下文场景
+body-limit: "200mb" # 最大 JSON 请求体大小，适合大上下文场景
 
 cloaking:
-  mode: "auto"            # auto | always | never
+  mode: "auto" # auto | always | never
   strict-mode: false
   sensitive-words: []
   cache-user-id: false
 
-debug: "off"            # off | errors | verbose
+debug: "off" # off | errors | verbose
 ```
 
 如果你要跑较长的 Claude Code 任务，也可以单独配置上游超时：
@@ -103,6 +103,7 @@ timeouts:
 默认请求体大小限制现在是 `200mb`，比之前固定的 `20mb` 更适合 Claude Code 的大上下文使用场景。
 
 `debug` 现在支持三级日志：
+
 - `off`：不输出额外调试日志
 - `errors`：记录上游/网络失败信息和上游错误响应正文
 - `verbose`：在 `errors` 基础上，再输出每个请求的方法、路径、状态码和耗时
@@ -124,12 +125,12 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### 支持的模型
 
-| 模型 ID | 说明 |
-|--------|------|
-| `claude-opus-4-6` | Claude Opus 4.6 |
-| `claude-sonnet-4-6` | Claude Sonnet 4.6 |
-| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 |
-| `claude-haiku-4-5` | Claude Haiku 4.5 的别名 |
+| 模型 ID                     | 说明                    |
+| --------------------------- | ----------------------- |
+| `claude-opus-4-6`           | Claude Opus 4.6         |
+| `claude-sonnet-4-6`         | Claude Sonnet 4.6       |
+| `claude-haiku-4-5-20251001` | Claude Haiku 4.5        |
+| `claude-haiku-4-5`          | Claude Haiku 4.5 的别名 |
 
 auth2api 额外支持以下便捷别名：
 
@@ -139,17 +140,29 @@ auth2api 额外支持以下便捷别名：
 
 ### 接口列表
 
-| Endpoint | 说明 |
-|----------|------|
-| `POST /v1/chat/completions` | OpenAI 兼容聊天接口 |
-| `POST /v1/responses` | OpenAI Responses API 兼容接口 |
-| `POST /v1/messages` | Claude 原生消息透传 |
-| `POST /v1/messages/count_tokens` | Claude token 计数 |
-| `GET /v1/models` | 列出可用模型 |
-| `GET /admin/accounts` | 查看账号健康状态（需要 API key） |
-| `GET /health` | 健康检查 |
+| Endpoint                         | 说明                             |
+| -------------------------------- | -------------------------------- |
+| `POST /v1/chat/completions`      | OpenAI 兼容聊天接口              |
+| `POST /v1/responses`             | OpenAI Responses API 兼容接口    |
+| `POST /v1/messages`              | Claude 原生消息透传              |
+| `POST /v1/messages/count_tokens` | Claude token 计数                |
+| `GET /v1/models`                 | 列出可用模型                     |
+| `GET /admin/accounts`            | 查看账号健康状态（需要 API key） |
+| `GET /health`                    | 健康检查                         |
 
 ## Docker
+
+### 快速开始（预构建镜像）
+
+默认分支会发布预构建镜像到 GitHub Container Registry：
+
+```bash
+docker pull ghcr.io/AmazingAng/auth2api:latest
+```
+
+拉取请求只会构建镜像用于校验，不会发布包。
+
+### 从源码构建
 
 ```bash
 # 构建
@@ -163,7 +176,7 @@ docker run -d \
   auth2api
 ```
 
-或者使用 docker-compose：
+或使用 docker-compose：
 
 ```bash
 docker-compose up -d
