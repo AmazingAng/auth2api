@@ -28,7 +28,7 @@ function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
 }
 
 export async function handleStreamingResponse(
-  upstreamResp: Response,
+  upstream: Response,
   resp: ExpressResponse,
   options?: StreamOptions,
 ): Promise<StreamResult> {
@@ -45,13 +45,14 @@ export async function handleStreamingResponse(
   resp.setHeader("X-Accel-Buffering", "no");
   resp.flushHeaders();
 
-  const reader = upstreamResp.body?.getReader();
+  const reader = upstream.body?.getReader();
   if (!reader) {
     resp.end();
     return { completed: true, clientDisconnected: false, usage };
   }
 
   const decoder = new TextDecoder();
+
   let buffer = "";
   let currentEvent = "";
   let clientDisconnected = false;
@@ -65,18 +66,20 @@ export async function handleStreamingResponse(
   try {
     while (!clientDisconnected) {
       const { done, value } = await reader.read();
+
       if (done) break;
+
+      if (!options?.onEvent) {
+        resp.write(value);
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
-      if (!options?.onEvent) {
-        resp.write(Buffer.from(value));
-      }
-
       for (const line of lines) {
         if (clientDisconnected) break;
+
         if (line.startsWith("event:")) {
           currentEvent = line.slice(6).trim();
         } else if (line.startsWith("data:")) {

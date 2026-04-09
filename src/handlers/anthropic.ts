@@ -1,11 +1,10 @@
 import { Request, Response as ExpressResponse } from "express";
-import { extractApiKey, hashApiKey } from "../utils/common";
 import { Config, isDebugLevel } from "../config";
 import { AccountManager, extractUsage } from "../accounts/manager";
 import { proxyWithRetry } from "../utils/http";
 import { applyCloaking } from "../upstream/cloaking";
 import {
-  callAnthropicAPI,
+  callAnthropicMessages,
   callAnthropicCountTokens,
 } from "../upstream/anthropic-api";
 import { handleStreamingResponse } from "../upstream/streaming";
@@ -34,59 +33,27 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
       }
 
       const stream = !!body.stream;
-      const apiKeyHash = hashApiKey(extractApiKey(req.headers));
 
-      // When request comes from claude-cli, pass through anthropic-* and session headers
-      const userAgent = req.headers["user-agent"] || "";
-      let passthroughHeaders: Record<string, string> | undefined;
-      let overrideSessionId: string | undefined;
-      if (
-        typeof userAgent === "string" &&
-        userAgent.toLowerCase().startsWith("claude-cli")
-      ) {
-        passthroughHeaders = {};
-        for (const [key, value] of Object.entries(req.headers)) {
-          if (key.startsWith("anthropic") && typeof value === "string") {
-            passthroughHeaders[key] = value;
-          }
-        }
-        const sessionId = req.headers["x-claude-code-session-id"];
-        if (typeof sessionId === "string") {
-          passthroughHeaders["X-Claude-Code-Session-Id"] = sessionId;
-          overrideSessionId = sessionId;
-        }
-      }
-
-      await proxyWithRetry(resp, config, manager, {
-        logPrefix: "Messages",
+      await proxyWithRetry("Messages", resp, config, manager, {
         upstream: (account) => {
-          const anthropicBody = applyCloaking(
-            body,
-            account.deviceId,
-            account.accountUuid,
-            apiKeyHash,
-            config.cloaking,
-            overrideSessionId,
-          );
-          return callAnthropicAPI(
-            account.token.accessToken,
-            anthropicBody,
-            stream,
-            config.timeouts,
-            config.cloaking,
-            apiKeyHash,
-            passthroughHeaders,
-          );
+          const anthropicBody = applyCloaking({
+            request: req,
+            account,
+            config,
+          });
+          return callAnthropicMessages({
+            body: anthropicBody,
+            request: req,
+            account,
+            config,
+          });
         },
-        success: async (upstreamResp, account) => {
+        success: async (upstream, account) => {
           if (stream) {
-            const streamResp = await handleStreamingResponse(
-              upstreamResp,
-              resp,
-            );
-            if (streamResp.completed) {
-              manager.recordSuccess(account.token.email, streamResp.usage);
-            } else if (!streamResp.clientDisconnected) {
+            const result = await handleStreamingResponse(upstream, resp);
+            if (result.completed) {
+              manager.recordSuccess(account.token.email, result.usage);
+            } else if (!result.clientDisconnected) {
               manager.recordFailure(
                 account.token.email,
                 "network",
@@ -94,9 +61,12 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
               );
             }
           } else {
-            const data = await upstreamResp.json();
-            manager.recordSuccess(account.token.email, extractUsage(data));
-            resp.json(data);
+            const anthropicResp = await upstream.json();
+            manager.recordSuccess(
+              account.token.email,
+              extractUsage(anthropicResp),
+            );
+            resp.json(anthropicResp);
           }
         },
       });
@@ -114,21 +84,12 @@ export function createCountTokensHandler(
 ) {
   return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
-      const apiKeyHash = hashApiKey(extractApiKey(req.headers));
-
-      await proxyWithRetry(resp, config, manager, {
-        logPrefix: "CountTokens",
+      await proxyWithRetry("CountTokens", resp, config, manager, {
         upstream: (account) =>
-          callAnthropicCountTokens(
-            account.token.accessToken,
-            req.body,
-            config.timeouts,
-            config.cloaking,
-            apiKeyHash,
-          ),
-        success: async (upstreamResp, account) => {
+          callAnthropicCountTokens({ request: req, account, config }),
+        success: async (upstream, account) => {
           manager.recordSuccess(account.token.email);
-          const data = await upstreamResp.json();
+          const data = await upstream.json();
           resp.json(data);
         },
       });

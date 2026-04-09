@@ -321,7 +321,10 @@ export function anthropicToOpenai(anthropicResp: any, model: string): any {
 export interface StreamState {
   chatId: string;
   model: string;
-  toolCalls: Map<number, { id: string; name: string; args: string; openaiIndex: number }>;
+  toolCalls: Map<
+    number,
+    { id: string; name: string; args: string; openaiIndex: number }
+  >;
   nextToolIndex: number;
   includeUsage: boolean;
 }

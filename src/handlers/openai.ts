@@ -1,5 +1,4 @@
 import { Request, Response as ExpressResponse } from "express";
-import { extractApiKey, hashApiKey } from "../utils/common";
 import { Config, isDebugLevel } from "../config";
 import { AccountManager, extractUsage } from "../accounts/manager";
 import { proxyWithRetry } from "../utils/http";
@@ -15,7 +14,7 @@ import {
   anthropicSSEToResponses,
 } from "../upstream/translator";
 import { applyCloaking } from "../upstream/cloaking";
-import { callAnthropicAPI } from "../upstream/anthropic-api";
+import { callAnthropicMessages } from "../upstream/anthropic-api";
 import { handleStreamingResponse } from "../upstream/streaming";
 
 // POST /v1/chat/completions — OpenAI Chat Completions format
@@ -41,7 +40,9 @@ export function createChatCompletionsHandler(
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const apiKeyHash = hashApiKey(extractApiKey(req.headers));
+      const structured =
+        body.response_format?.type === "json_object" ||
+        body.response_format?.type === "json_schema";
       const translatedBody = openaiToAnthropic(body);
 
       if (isDebugLevel(config.debug, "verbose")) {
@@ -51,42 +52,35 @@ export function createChatCompletionsHandler(
         console.log(JSON.stringify(translatedBody, null, 2));
       }
 
-      await proxyWithRetry(resp, config, manager, {
-        logPrefix: "ChatCompletions",
+      await proxyWithRetry("ChatCompletions", resp, config, manager, {
         upstream: (account) => {
-          const anthropicBody = applyCloaking(
-            translatedBody,
-            account.deviceId,
-            account.accountUuid,
-            apiKeyHash,
-            config.cloaking,
-          );
-          return callAnthropicAPI(
-            account.token.accessToken,
-            anthropicBody,
-            stream,
-            config.timeouts,
-            config.cloaking,
-            apiKeyHash,
-          );
+          const anthropicBody = applyCloaking({
+            body: translatedBody,
+            request: req,
+            account,
+            config,
+          });
+          return callAnthropicMessages({
+            body: anthropicBody,
+            request: req,
+            account,
+            config,
+            structured,
+          });
         },
-        success: async (upstreamResp, account) => {
+        success: async (upstream, account) => {
           if (stream) {
             const includeUsage = body.stream_options?.include_usage !== false;
             const state = createStreamState(model, includeUsage);
-            const streamResp = await handleStreamingResponse(
-              upstreamResp,
-              resp,
-              {
-                onEvent: (event, data, usage) =>
-                  anthropicSSEToChat(event, data, state, usage).map(
-                    (c) => `data: ${c}\n\n`,
-                  ),
-              },
-            );
-            if (streamResp.completed) {
-              manager.recordSuccess(account.token.email, streamResp.usage);
-            } else if (!streamResp.clientDisconnected) {
+            const result = await handleStreamingResponse(upstream, resp, {
+              onEvent: (event, data, usage) =>
+                anthropicSSEToChat(event, data, state, usage).map(
+                  (c) => `data: ${c}\n\n`,
+                ),
+            });
+            if (result.completed) {
+              manager.recordSuccess(account.token.email, result.usage);
+            } else if (!result.clientDisconnected) {
               manager.recordFailure(
                 account.token.email,
                 "network",
@@ -94,7 +88,7 @@ export function createChatCompletionsHandler(
               );
             }
           } else {
-            const anthropicResp = await upstreamResp.json();
+            const anthropicResp = await upstream.json();
             manager.recordSuccess(
               account.token.email,
               extractUsage(anthropicResp),
@@ -125,39 +119,34 @@ export function createResponsesHandler(
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const apiKeyHash = hashApiKey(extractApiKey(req.headers));
+      const structured =
+        body.text?.format?.type === "json_object" ||
+        body.text?.format?.type === "json_schema";
       const translatedBody = responsesToAnthropic(body);
 
-      await proxyWithRetry(resp, config, manager, {
-        logPrefix: "Responses",
+      await proxyWithRetry("Responses", resp, config, manager, {
         upstream: (account) => {
-          const anthropicBody = applyCloaking(
-            translatedBody,
-            account.deviceId,
-            account.accountUuid,
-            apiKeyHash,
-            config.cloaking,
-          );
-          return callAnthropicAPI(
-            account.token.accessToken,
-            anthropicBody,
-            stream,
-            config.timeouts,
-            config.cloaking,
-            apiKeyHash,
-          );
+          const anthropicBody = applyCloaking({
+            body: translatedBody,
+            request: req,
+            account,
+            config,
+          });
+          return callAnthropicMessages({
+            body: anthropicBody,
+            request: req,
+            account,
+            config,
+            structured,
+          });
         },
-        success: async (upstreamResp, account) => {
+        success: async (upstream, account) => {
           if (stream) {
             const state = makeResponsesState();
-            const streamResp = await handleStreamingResponse(
-              upstreamResp,
-              resp,
-              {
-                onEvent: (event, data, usage) =>
-                  anthropicSSEToResponses(event, data, state, model, usage),
-              },
-            );
+            const streamResp = await handleStreamingResponse(upstream, resp, {
+              onEvent: (event, data, usage) =>
+                anthropicSSEToResponses(event, data, state, model, usage),
+            });
             if (streamResp.completed) {
               manager.recordSuccess(account.token.email, streamResp.usage);
             } else if (!streamResp.clientDisconnected) {
@@ -168,7 +157,7 @@ export function createResponsesHandler(
               );
             }
           } else {
-            const anthropicResp = await upstreamResp.json();
+            const anthropicResp = await upstream.json();
             manager.recordSuccess(
               account.token.email,
               extractUsage(anthropicResp),

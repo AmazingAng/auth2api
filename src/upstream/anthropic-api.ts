@@ -1,5 +1,9 @@
 import crypto from "crypto";
-import { CloakingConfig, TimeoutConfig } from "../config";
+import { Request } from "express";
+import { IncomingHttpHeaders } from "http";
+import { CloakingConfig, Config } from "../config";
+import { AvailableAccount } from "../accounts/manager";
+import { extractApiKey, hashApiKey } from "../utils/common";
 
 const BASE_URL = "https://api.anthropic.com";
 
@@ -7,15 +11,19 @@ const BASE_URL = "https://api.anthropic.com";
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
  * getAllModelBetas(). Real Claude Code sends different betas per model.
  */
-function buildBetaHeader(model: string, beta?: any): string {
+function buildBetaHeader(model: string, structured: boolean): string {
   const isHaiku = model.includes("haiku");
 
   if (isHaiku) {
-    return "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15";
+    if (structured) {
+      return "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15";
+    } else {
+      return "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219";
+    }
   }
 
-  if (typeof beta === "string" && beta.includes("context-1m")) {
-    return "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
+  if (structured) {
+    return "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15";
   }
 
   return "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
@@ -68,7 +76,7 @@ function randomTTL(): number {
   return SESSION_TTL_MIN + Math.random() * (SESSION_TTL_MAX - SESSION_TTL_MIN);
 }
 
-export function getSessionId(apiKeyHash: string): string {
+export function getSessionID(apiKeyHash: string): string {
   const now = Date.now();
   const entry = sessionMap.get(apiKeyHash);
   if (entry && now - entry.lastUsed < entry.ttl) {
@@ -89,17 +97,18 @@ export const DEFAULT_CLI_VERSION = "2.1.88";
 export const DEFAULT_ENTRYPOINT = "cli";
 
 function buildHeaders(
-  accessToken: string,
+  token: string,
   stream: boolean,
   timeoutMs: number,
   model: string,
   cloaking: CloakingConfig,
   apiKeyHash?: string,
+  structured?: boolean,
   extraHeaders?: Record<string, string>,
 ): Record<string, string> {
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
-  const sessionId = getSessionId(apiKeyHash || "default");
+  const sessionID = getSessionID(apiKeyHash || "default");
 
   // Header casing from mitmproxy capture of real Claude Code CLI:
   // - anthropic-*, x-app, x-client-request-id: lowercase
@@ -107,9 +116,9 @@ function buildHeaders(
   const headers: Record<string, string> = {
     // Capitalized headers
     "Content-Type": "application/json",
-    Authorization: `Bearer ${accessToken}`,
+    Authorization: `Bearer ${token}`,
     "User-Agent": `claude-cli/${cliVersion} (external, ${entrypoint})`,
-    "X-Claude-Code-Session-Id": sessionId,
+    "X-Claude-Code-Session-Id": sessionID,
     "X-Stainless-Lang": "js",
     "X-Stainless-Package-Version": "0.74.0",
     "X-Stainless-Runtime": "node",
@@ -129,44 +138,76 @@ function buildHeaders(
   // Override with extra headers (e.g. anthropic-* from claude-cli clients)
   if (extraHeaders) {
     Object.assign(headers, extraHeaders);
-    headers["anthropic-beta"] = buildBetaHeader(
-      model,
-      extraHeaders["anthropic-beta"],
-    );
+  }
+
+  const beta = headers["anthropic-beta"];
+
+  if (typeof beta == "string") {
+    headers["anthropic-beta"] = `oauth-2025-04-20,${beta}`;
   } else {
-    headers["anthropic-beta"] = buildBetaHeader(model);
+    headers["anthropic-beta"] = buildBetaHeader(model, !!structured);
   }
 
   return headers;
 }
 
-export async function callAnthropicAPI(
-  accessToken: string,
-  body: any,
-  stream: boolean,
-  timeouts: TimeoutConfig,
-  cloaking: CloakingConfig,
-  apiKeyHash?: string,
-  extraHeaders?: Record<string, string>,
+function extractPassthroughHeaders(
+  headers: IncomingHttpHeaders,
+): Record<string, string> | undefined {
+  const userAgent = headers["user-agent"] || "";
+  if (
+    typeof userAgent !== "string" ||
+    !userAgent.toLowerCase().startsWith("claude-cli")
+  ) {
+    return undefined;
+  }
+  const passthrough: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.startsWith("anthropic") && typeof value === "string") {
+      passthrough[key] = value;
+    }
+  }
+  const sessionID = headers["x-claude-code-session-id"];
+  if (typeof sessionID === "string") {
+    passthrough["X-Claude-Code-Session-Id"] = sessionID;
+  }
+  return passthrough;
+}
+
+export interface CallMessagesOptions {
+  body?: any;
+  request: Request;
+  account: AvailableAccount;
+  config: Config;
+  structured?: boolean;
+}
+
+export async function callAnthropicMessages(
+  options: CallMessagesOptions,
 ): Promise<Response> {
+  const { request, account, config, structured } = options;
+  const body = options.body ?? request.body;
   const url = `${BASE_URL}/v1/messages?beta=true`;
+  const stream = !!body.stream;
   const model = body.model || "claude-sonnet-4-6";
+  const apiKeyHash = hashApiKey(extractApiKey(request.headers));
   const timeoutMs = stream
-    ? timeouts["stream-messages-ms"]
-    : timeouts["messages-ms"];
-  const headers = buildHeaders(
-    accessToken,
+    ? config.timeouts["stream-messages-ms"]
+    : config.timeouts["messages-ms"];
+  const newHeaders = buildHeaders(
+    account.token.accessToken,
     stream,
     timeoutMs,
     model,
-    cloaking,
+    config.cloaking,
     apiKeyHash,
-    extraHeaders,
+    structured,
+    extractPassthroughHeaders(request.headers),
   );
 
   const response = await fetch(url, {
     method: "POST",
-    headers,
+    headers: newHeaders,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -174,29 +215,35 @@ export async function callAnthropicAPI(
   return response;
 }
 
+export interface CallCountTokensOptions {
+  request: Request;
+  account: AvailableAccount;
+  config: Config;
+}
+
 export async function callAnthropicCountTokens(
-  accessToken: string,
-  body: any,
-  timeouts: TimeoutConfig,
-  cloaking: CloakingConfig,
-  apiKeyHash?: string,
+  options: CallCountTokensOptions,
 ): Promise<Response> {
+  const { request, account, config } = options;
+  const body = request.body;
   const url = `${BASE_URL}/v1/messages/count_tokens?beta=true`;
-  const rawModel = body.model || "claude-sonnet-4-6";
-  const headers = buildHeaders(
-    accessToken,
+  const model = body.model || "claude-sonnet-4-6";
+  const apiKeyHash = hashApiKey(extractApiKey(request.headers));
+  const timeoutMs = config.timeouts["count-tokens-ms"];
+  const newHeaders = buildHeaders(
+    account.token.accessToken,
     false,
-    timeouts["count-tokens-ms"],
-    rawModel,
-    cloaking,
+    timeoutMs,
+    model,
+    config.cloaking,
     apiKeyHash,
   );
 
   const response = await fetch(url, {
     method: "POST",
-    headers,
+    headers: newHeaders,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeouts["count-tokens-ms"]),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   return response;

@@ -58,12 +58,12 @@ export function accountUnavailable(
 
 export interface ProxyOptions {
   upstream: (account: AvailableAccount) => Promise<Response>;
-  success: (upstreamResp: Response, account: AvailableAccount) => Promise<void>;
-  logPrefix: string;
+  success: (upstream: Response, account: AvailableAccount) => Promise<void>;
   maxRetries?: number;
 }
 
 export async function proxyWithRetry(
+  tag: string,
   resp: ExpressResponse,
   config: Config,
   manager: AccountManager,
@@ -82,14 +82,14 @@ export async function proxyWithRetry(
     const account = result.account;
     manager.recordAttempt(account.token.email);
 
-    let upstreamResp: Response;
+    let upstream: Response;
     try {
-      upstreamResp = await options.upstream(account);
+      upstream = await options.upstream(account);
     } catch (err: any) {
       manager.recordFailure(account.token.email, "network", err.message);
       if (isDebugLevel(config.debug, "errors")) {
         console.error(
-          `${options.logPrefix} attempt ${attempt + 1} network failure: ${err.message}`,
+          `${tag} attempt ${attempt + 1} network failure: ${err.message}`,
         );
       }
       if (attempt < maxRetries - 1) {
@@ -100,17 +100,17 @@ export async function proxyWithRetry(
       return;
     }
 
-    if (upstreamResp.ok) {
-      await options.success(upstreamResp, account);
+    if (upstream.ok) {
+      await options.success(upstream, account);
       return;
     }
 
-    lastStatus = upstreamResp.status;
+    lastStatus = upstream.status;
     try {
-      lastErrBody = await upstreamResp.text();
+      lastErrBody = await upstream.text();
       if (isDebugLevel(config.debug, "errors")) {
         console.error(
-          `${options.logPrefix} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
+          `${tag} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
         );
       }
     } catch {
