@@ -8,7 +8,7 @@ import { AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 
 import { AccountManager } from "../src/accounts/manager";
-import { Config } from "../src/config";
+import { Config, loadConfig } from "../src/config";
 import { createServer } from "../src/server";
 import { saveToken } from "../src/auth/token-storage";
 import { TokenData } from "../src/auth/types";
@@ -20,13 +20,11 @@ function makeConfig(authDir: string): Config {
     host: "127.0.0.1",
     port: 0,
     "auth-dir": authDir,
-    "api-keys": ["test-key"],
+    "api-keys": new Set(["test-key"]),
     "body-limit": "200mb",
     cloaking: {
-      mode: "never",
-      "strict-mode": false,
-      "sensitive-words": [],
-      "cache-user-id": false,
+      "cli-version": "2.1.88",
+      entrypoint: "cli",
     },
     timeouts: {
       "messages-ms": 120000,
@@ -43,6 +41,7 @@ function makeToken(overrides: Partial<TokenData> = {}): TokenData {
     refreshToken: "refresh-token",
     email: "test@example.com",
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    accountUuid: "test-uuid",
     ...overrides,
   };
 }
@@ -56,7 +55,10 @@ function makeManager(authDir: string, tokens: TokenData[]): AccountManager {
   return manager;
 }
 
-async function startApp(config: Config, manager: AccountManager): Promise<http.Server> {
+async function startApp(
+  config: Config,
+  manager: AccountManager,
+): Promise<http.Server> {
   const app = createServer(config, manager);
   const server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -78,7 +80,7 @@ async function requestJson(options: {
   path: string;
   headers?: Record<string, string>;
   body?: unknown;
-}): Promise<{ status: number; body: any }> {
+}): Promise<{ status: number; body: any; headers: http.IncomingHttpHeaders }> {
   const address = serverAddress(options.server);
   const payload = options.body ? JSON.stringify(options.body) : undefined;
 
@@ -90,7 +92,12 @@ async function requestJson(options: {
         method: options.method,
         path: options.path,
         headers: {
-          ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload).toString() } : {}),
+          ...(payload
+            ? {
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload).toString(),
+              }
+            : {}),
           ...(options.headers || {}),
         },
       },
@@ -104,9 +111,10 @@ async function requestJson(options: {
           resolve({
             status: res.statusCode || 0,
             body: data ? JSON.parse(data) : null,
+            headers: res.headers,
           });
         });
-      }
+      },
     );
 
     req.on("error", reject);
@@ -124,7 +132,10 @@ function serverAddress(server: http.Server): AddressInfo {
 }
 
 function withMockedFetch(
-  mock: (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+  mock: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>,
 ): () => void {
   const originalFetch = global.fetch;
   global.fetch = mock as typeof fetch;
@@ -173,7 +184,10 @@ test("proxies a non-stream chat completion through Claude OAuth token", async (t
     const url = String(input);
     assert.equal(url, "https://api.anthropic.com/v1/messages?beta=true");
     assert.equal(init?.method, "POST");
-    assert.equal(init?.headers && (init.headers as Record<string, string>).Authorization, "Bearer access-token");
+    assert.equal(
+      init?.headers && (init.headers as Record<string, string>).Authorization,
+      "Bearer access-token",
+    );
 
     return new Response(
       JSON.stringify({
@@ -182,7 +196,7 @@ test("proxies a non-stream chat completion through Claude OAuth token", async (t
         stop_reason: "end_turn",
         usage: { input_tokens: 12, output_tokens: 5 },
       }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: { "Content-Type": "application/json" } },
     );
   });
   const server = await startApp(makeConfig(authDir), manager);
@@ -220,7 +234,8 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
     calls.push(url);
 
     if (url === "https://api.anthropic.com/v1/messages?beta=true") {
-      const authHeader = (init?.headers as Record<string, string>).Authorization;
+      const authHeader = (init?.headers as Record<string, string>)
+        .Authorization;
       if (authHeader === "Bearer access-token") {
         return new Response("unauthorized", { status: 401 });
       }
@@ -232,7 +247,7 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
             stop_reason: "end_turn",
             usage: { input_tokens: 3, output_tokens: 2 },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
     }
@@ -245,7 +260,7 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
           expires_in: 3600,
           account: { email_address: "test@example.com" },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
 
@@ -294,9 +309,15 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
 test("returns rate limited when the configured account is cooled down", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   const manager = makeManager(authDir, [makeToken()]);
-  manager.recordFailure("test@example.com", "rate_limit", "forced for smoke test");
+  manager.recordFailure(
+    "test@example.com",
+    "rate_limit",
+    "forced for smoke test",
+  );
   const restoreFetch = withMockedFetch(async () => {
-    throw new Error("Upstream should not be called while the configured account is cooled down");
+    throw new Error(
+      "Upstream should not be called while the configured account is cooled down",
+    );
   });
   const server = await startApp(makeConfig(authDir), manager);
 
@@ -318,7 +339,140 @@ test("returns rate limited when the configured account is cooled down", async (t
   });
 
   assert.equal(resp.status, 429);
-  assert.equal(resp.body.error.message, "Rate limited on the configured account");
+  assert.equal(
+    resp.body.error.message,
+    "Rate limited on the configured account",
+  );
+  assert.equal(typeof resp.headers["retry-after"], "string");
+});
+
+test("returns 503 when account requires re-authentication", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "auth", "forced");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("should not be called");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(
+    resp.body.error.message,
+    "Configured account requires re-authentication",
+  );
+});
+
+test("returns 503 when account is forbidden", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "forbidden", "forced");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("should not be called");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(resp.body.error.message, "Configured account is forbidden");
+});
+
+test("returns 503 when upstream server is unavailable", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "server", "forced");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("should not be called");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(
+    resp.body.error.message,
+    "Upstream server temporarily unavailable",
+  );
+});
+
+test("returns 503 when upstream network is unavailable", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  manager.recordFailure("test@example.com", "network", "forced");
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("should not be called");
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+    },
+  });
+
+  assert.equal(resp.status, 503);
+  assert.equal(
+    resp.body.error.message,
+    "Upstream network temporarily unavailable",
+  );
 });
 
 test("loads multiple accounts successfully", (t) => {
@@ -327,15 +481,21 @@ test("loads multiple accounts successfully", (t) => {
     fs.rmSync(authDir, { recursive: true, force: true });
   });
 
-  saveToken(authDir, makeToken({ email: "first@example.com", accessToken: "first-access" }));
-  saveToken(authDir, makeToken({ email: "second@example.com", accessToken: "second-access" }));
+  saveToken(
+    authDir,
+    makeToken({ email: "first@example.com", accessToken: "first-access" }),
+  );
+  saveToken(
+    authDir,
+    makeToken({ email: "second@example.com", accessToken: "second-access" }),
+  );
 
   const manager = new AccountManager(authDir);
   manager.load();
   assert.equal(manager.accountCount, 2);
 });
 
-test("round-robin rotates between multiple accounts", (t) => {
+test("sticky selection keeps using the same available account", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -348,24 +508,19 @@ test("round-robin rotates between multiple accounts", (t) => {
   ]);
 
   const first = manager.getNextAccount();
-  assert.ok(first);
-  assert.equal(first.token.email, "a@example.com");
+  assert.ok(first.account);
+  assert.equal(first.account.token.email, "a@example.com");
 
   const second = manager.getNextAccount();
-  assert.ok(second);
-  assert.equal(second.token.email, "b@example.com");
+  assert.ok(second.account);
+  assert.equal(second.account.token.email, "a@example.com");
 
   const third = manager.getNextAccount();
-  assert.ok(third);
-  assert.equal(third.token.email, "c@example.com");
-
-  // wraps around
-  const fourth = manager.getNextAccount();
-  assert.ok(fourth);
-  assert.equal(fourth.token.email, "a@example.com");
+  assert.ok(third.account);
+  assert.equal(third.account.token.email, "a@example.com");
 });
 
-test("round-robin skips cooled-down accounts", (t) => {
+test("sticky selection switches when the current account is cooled down", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -377,26 +532,22 @@ test("round-robin skips cooled-down accounts", (t) => {
     makeToken({ email: "c@example.com", accessToken: "token-c" }),
   ]);
 
-  // Cool down account a
+  const first = manager.getNextAccount();
+  assert.ok(first.account);
+  assert.equal(first.account.token.email, "a@example.com");
+
   manager.recordFailure("a@example.com", "rate_limit", "test");
 
-  // Should skip a, get b
-  const first = manager.getNextAccount();
-  assert.ok(first);
-  assert.equal(first.token.email, "b@example.com");
-
-  // Next should be c
   const second = manager.getNextAccount();
-  assert.ok(second);
-  assert.equal(second.token.email, "c@example.com");
+  assert.ok(second.account);
+  assert.equal(second.account.token.email, "b@example.com");
 
-  // Next should skip a again, get b
   const third = manager.getNextAccount();
-  assert.ok(third);
-  assert.equal(third.token.email, "b@example.com");
+  assert.ok(third.account);
+  assert.equal(third.account.token.email, "b@example.com");
 });
 
-test("returns null when all accounts are cooled down", (t) => {
+test("returns failure info when all accounts are cooled down", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   t.after(() => {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -411,10 +562,33 @@ test("returns null when all accounts are cooled down", (t) => {
   manager.recordFailure("b@example.com", "rate_limit", "test");
 
   const result = manager.getNextAccount();
-  assert.equal(result, null);
+  if (result.account !== null) {
+    assert.fail("Expected null account");
+  }
+  assert.equal(result.failureKind, "rate_limit");
+  assert.ok((result.retryAfterMs ?? 0) > 0);
+});
 
-  const availability = manager.getAvailability();
-  assert.equal(availability.state, "cooldown");
+test("prefers recoverable failure over terminal when all accounts down", (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  t.after(() => {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const manager = makeManager(authDir, [
+    makeToken({ email: "a@example.com", accessToken: "token-a" }),
+    makeToken({ email: "b@example.com", accessToken: "token-b" }),
+  ]);
+
+  manager.recordFailure("a@example.com", "auth", "test");
+  manager.recordFailure("b@example.com", "rate_limit", "test");
+
+  const result = manager.getNextAccount();
+  if (result.account !== null) {
+    assert.fail("Expected null account");
+  }
+  assert.equal(result.failureKind, "rate_limit");
+  assert.ok((result.retryAfterMs ?? 0) > 0);
 });
 
 test("multi-account admin endpoint shows all accounts", async (t) => {
@@ -443,7 +617,7 @@ test("multi-account admin endpoint shows all accounts", async (t) => {
   assert.deepEqual(emails, ["a@example.com", "b@example.com"]);
 });
 
-test("multi-account proxies requests using round-robin accounts", async (t) => {
+test("multi-account proxies requests using sticky account until failover", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   const manager = makeManager(authDir, [
     makeToken({ email: "a@example.com", accessToken: "token-a" }),
@@ -462,7 +636,7 @@ test("multi-account proxies requests using round-robin accounts", async (t) => {
         stop_reason: "end_turn",
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: { "Content-Type": "application/json" } },
     );
   });
 
@@ -480,7 +654,11 @@ test("multi-account proxies requests using round-robin accounts", async (t) => {
     method: "POST",
     path: "/v1/chat/completions",
     headers: { Authorization: "Bearer test-key" },
-    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "1" }], stream: false },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "1" }],
+      stream: false,
+    },
   });
 
   // Second request
@@ -489,7 +667,11 @@ test("multi-account proxies requests using round-robin accounts", async (t) => {
     method: "POST",
     path: "/v1/chat/completions",
     headers: { Authorization: "Bearer test-key" },
-    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "2" }], stream: false },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "2" }],
+      stream: false,
+    },
   });
 
   // Third request (wraps around)
@@ -498,10 +680,14 @@ test("multi-account proxies requests using round-robin accounts", async (t) => {
     method: "POST",
     path: "/v1/chat/completions",
     headers: { Authorization: "Bearer test-key" },
-    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "3" }], stream: false },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "3" }],
+      stream: false,
+    },
   });
 
-  assert.deepEqual(usedTokens, ["token-a", "token-b", "token-a"]);
+  assert.deepEqual(usedTokens, ["token-a", "token-a", "token-a"]);
 });
 
 test("multi-account falls back to next account on rate limit", async (t) => {
@@ -527,7 +713,7 @@ test("multi-account falls back to next account on rate limit", async (t) => {
         stop_reason: "end_turn",
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: { "Content-Type": "application/json" } },
     );
   });
 
@@ -544,7 +730,11 @@ test("multi-account falls back to next account on rate limit", async (t) => {
     method: "POST",
     path: "/v1/chat/completions",
     headers: { Authorization: "Bearer test-key" },
-    body: { model: "claude-sonnet-4", messages: [{ role: "user", content: "hi" }], stream: false },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+    },
   });
 
   assert.equal(resp.status, 200);
@@ -552,4 +742,36 @@ test("multi-account falls back to next account on rate limit", async (t) => {
   // First attempt used token-a (got 429), retry used token-b (success)
   assert.equal(usedTokens[0], "token-a");
   assert.ok(usedTokens.includes("token-b"));
+});
+
+// ── loadConfig: YAML api-keys array → Set ──
+
+test("loadConfig converts YAML api-keys array to Set", () => {
+  const configPath = path.join(os.tmpdir(), `auth2api-test-${Date.now()}.yaml`);
+  fs.writeFileSync(
+    configPath,
+    [
+      'host: "127.0.0.1"',
+      "port: 9999",
+      'auth-dir: "~/.auth2api"',
+      "api-keys:",
+      '  - "sk-key-one"',
+      '  - "sk-key-two"',
+      '  - "sk-key-three"',
+      'body-limit: "100mb"',
+      'debug: "off"',
+    ].join("\n"),
+  );
+
+  try {
+    const config = loadConfig(configPath);
+    assert.ok(config["api-keys"] instanceof Set);
+    assert.equal(config["api-keys"].size, 3);
+    assert.ok(config["api-keys"].has("sk-key-one"));
+    assert.ok(config["api-keys"].has("sk-key-two"));
+    assert.ok(config["api-keys"].has("sk-key-three"));
+    assert.ok(!config["api-keys"].has("sk-missing"));
+  } finally {
+    fs.unlinkSync(configPath);
+  }
 });

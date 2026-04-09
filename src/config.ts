@@ -26,14 +26,19 @@ export interface Config {
   host: string;
   port: number;
   "auth-dir": string;
-  "api-keys": string[];
+  "api-keys": Set<string>;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   debug: DebugMode;
 }
 
-const DEFAULT_CONFIG: Config = {
+// Raw config shape from YAML (api-keys is an array, not a Set)
+interface RawConfig extends Omit<Config, "api-keys"> {
+  "api-keys": string[];
+}
+
+const DEFAULT_RAW: RawConfig = {
   host: "",
   port: 8317,
   "auth-dir": "~/.auth2api",
@@ -80,37 +85,33 @@ export function generateApiKey(): string {
 
 export function loadConfig(configPath?: string): Config {
   const filePath = configPath || "config.yaml";
-  let config: Config;
+  let raw: RawConfig;
 
   if (!fs.existsSync(filePath)) {
     console.log(`Config file not found at ${filePath}, using defaults`);
-    config = { ...DEFAULT_CONFIG };
+    raw = { ...DEFAULT_RAW };
   } else {
-    const raw = fs.readFileSync(filePath, "utf-8");
-    const parsed = yaml.load(raw) as Partial<Config>;
-    config = {
-      ...DEFAULT_CONFIG,
+    const content = fs.readFileSync(filePath, "utf-8");
+    const parsed = yaml.load(content) as Partial<RawConfig>;
+    raw = {
+      ...DEFAULT_RAW,
       ...parsed,
-      // Merge cloaking config with defaults
-      cloaking: { ...DEFAULT_CONFIG.cloaking, ...(parsed.cloaking || {}) },
-      timeouts: { ...DEFAULT_CONFIG.timeouts, ...(parsed.timeouts || {}) },
+      cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
+      timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
     };
   }
 
-  config.debug = normalizeDebugMode(
-    (config as Config & { debug?: unknown }).debug,
-  );
+  raw.debug = normalizeDebugMode(raw.debug);
 
   // Auto-generate API key if none configured
-  if (!config["api-keys"] || config["api-keys"].length === 0) {
+  if (!raw["api-keys"] || raw["api-keys"].length === 0) {
     const key = generateApiKey();
-    config["api-keys"] = [key];
-    // Write config with generated key
-    fs.writeFileSync(filePath, yaml.dump(config, { lineWidth: -1 }), {
+    raw["api-keys"] = [key];
+    fs.writeFileSync(filePath, yaml.dump(raw, { lineWidth: -1 }), {
       mode: 0o600,
     });
     console.log(`\nGenerated API key (saved to ${filePath}):\n\n  ${key}\n`);
   }
 
-  return config;
+  return { ...raw, "api-keys": new Set(raw["api-keys"]) };
 }

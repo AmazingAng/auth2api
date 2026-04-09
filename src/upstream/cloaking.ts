@@ -1,10 +1,13 @@
 import crypto from "crypto";
-import { CloakingConfig } from "../config";
-import { getSessionId } from "./claude-api";
-
-/** Default values */
-const DEFAULT_CLI_VERSION = "2.1.88";
-const DEFAULT_ENTRYPOINT = "cli";
+import { Request } from "express";
+import type { Config } from "../config";
+import { AvailableAccount } from "../accounts/manager";
+import { extractApiKey, hashApiKey } from "../utils/common";
+import {
+  getSessionID,
+  DEFAULT_CLI_VERSION,
+  DEFAULT_ENTRYPOINT,
+} from "./anthropic-api";
 
 /**
  * Fingerprint algorithm — exact replica of Claude Code's utils/fingerprint.ts
@@ -91,76 +94,74 @@ function isPrefixBlock(block: any): boolean {
  *
  * Always injects metadata.user_id (since external clients don't have the auth2api device_id).
  */
-export function applyCloaking(
-  body: any,
-  deviceId: string,
-  accountUuid: string,
-  apiKeyHash: string,
-  cloaking: CloakingConfig,
-  overrideSessionId?: string,
-): any {
+export interface CloakingOptions {
+  body?: any;
+  request: Request;
+  account: AvailableAccount;
+  config: Config;
+}
+
+export function applyCloaking(options: CloakingOptions): any {
+  const { request, account, config } = options;
+  const body = structuredClone(options.body ?? request.body);
+  const cloaking = config.cloaking;
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
 
-  // Normalize existing system to array
+  // --- System prompt injection ---
+  // Ensures billing header and CLI prefix are present in the system blocks.
+  // Claude Code CLI clients may already include these; if so, keep the originals.
+  // For OpenAI-compatible clients we generate them from scratch.
+
   const existingSystem = body.system || [];
-  const systemArray: any[] = Array.isArray(existingSystem)
+  const remaining: any[] = Array.isArray(existingSystem)
     ? [...existingSystem]
     : [{ type: "text", text: existingSystem }];
 
-  // Detect if client already sent Claude Code-style system prompt
-  const hasBillingHeader = systemArray.some(isBillingHeaderBlock);
-  const hasPrefix = systemArray.some(isPrefixBlock);
+  // Extract existing billing header and prefix if present, removing them from remaining
+  const billingIdx = remaining.findIndex(isBillingHeaderBlock);
+  const billingBlock =
+    billingIdx >= 0
+      ? remaining.splice(billingIdx, 1)[0]
+      : {
+          type: "text",
+          text: generateBillingHeader(
+            body.messages || [],
+            cliVersion,
+            entrypoint,
+          ),
+        };
 
-  // Build system blocks in correct order
-  const systemBlocks: any[] = [];
-  const PREFIX_TEXT =
-    "You are Claude Code, Anthropic's official CLI for Claude.";
+  const prefixIdx = remaining.findIndex(isPrefixBlock);
+  const prefixBlock =
+    prefixIdx >= 0
+      ? remaining.splice(prefixIdx, 1)[0]
+      : {
+          type: "text",
+          text: "You are Claude Code, Anthropic's official CLI for Claude.",
+          cache_control: { type: "ephemeral" },
+        };
 
-  // 1. Billing header (position 0)
-  if (hasBillingHeader) {
-    // Keep client's billing header (Claude Code CLI mode)
-    const existingBilling = systemArray.find(isBillingHeaderBlock)!;
-    systemBlocks.push(existingBilling);
-  } else {
-    // Generate our own (OpenAI client mode)
-    const billingHeader = generateBillingHeader(
-      body.messages || [],
-      cliVersion,
-      entrypoint,
-    );
-    systemBlocks.push({ type: "text", text: billingHeader });
-  }
+  // Reassemble: billing header (pos 0), prefix (pos 1), then the rest
+  body.system = [billingBlock, prefixBlock, ...remaining];
 
-  // 2. Prefix block (position 1)
-  if (hasPrefix) {
-    // Keep client's prefix (Claude Code CLI mode)
-    const existingPrefix = systemArray.find(isPrefixBlock)!;
-    systemBlocks.push(existingPrefix);
-  } else {
-    systemBlocks.push({
-      type: "text",
-      text: PREFIX_TEXT,
-    });
-  }
+  // --- Metadata injection ---
+  // metadata.user_id identifies the device, account, and session to the upstream API.
+  // Claude Code CLI clients may pass a session ID header; otherwise we derive one
+  // from the downstream API key so each user gets a stable, rotating session.
 
-  for (const block of systemArray) {
-    // Skip billing header and prefix blocks (already handled above)
-    if (isBillingHeaderBlock(block) || isPrefixBlock(block)) {
-      continue;
-    }
+  const apiKeyHash = hashApiKey(extractApiKey(request.headers));
 
-    systemBlocks.push(block);
-  }
+  let sessionID = request.headers["x-claude-code-session-id"];
+  sessionID =
+    typeof sessionID === "string" ? sessionID : getSessionID(apiKeyHash);
 
-  body.system = systemBlocks;
-
-  // 4. metadata.user_id — always set since external clients don't have auth2api's device_id
   if (!body.metadata) body.metadata = {};
+
   body.metadata.user_id = buildUserId(
-    deviceId,
-    accountUuid,
-    overrideSessionId || getSessionId(apiKeyHash),
+    account.deviceId,
+    account.accountUuid,
+    sessionID,
   );
 
   return body;

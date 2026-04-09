@@ -1,14 +1,15 @@
-import crypto from "crypto";
 import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { AccountManager } from "./accounts/manager";
-import { extractApiKey } from "./api-key";
-import { createChatCompletionsHandler } from "./proxy/handler";
+import { extractApiKey } from "./utils/common";
+import {
+  createChatCompletionsHandler,
+  createResponsesHandler,
+} from "./handlers/openai";
 import {
   createMessagesHandler,
   createCountTokensHandler,
-} from "./proxy/passthrough";
-import { createResponsesHandler } from "./proxy/responses";
+} from "./handlers/anthropic";
 
 const SUPPORTED_MODELS = [
   "claude-opus-4-6",
@@ -19,19 +20,6 @@ const SUPPORTED_MODELS = [
   "sonnet",
   "haiku",
 ] as const;
-
-// Timing-safe API key comparison
-function safeCompare(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) {
-    // Compare dummy against itself to consume constant time
-    const dummy = Buffer.alloc(bufB.length);
-    crypto.timingSafeEqual(dummy, dummy);
-    return false;
-  }
-  return crypto.timingSafeEqual(bufA, bufB);
-}
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -119,7 +107,7 @@ export function createServer(
       res.status(401).json({ error: { message: "Missing API key" } });
       return;
     }
-    const valid = config["api-keys"].some((k) => safeCompare(key, k));
+    const valid = config["api-keys"].has(key);
     if (!valid) {
       res.status(403).json({ error: { message: "Invalid API key" } });
       return;
@@ -127,23 +115,21 @@ export function createServer(
     next();
   };
 
-  app.use("/v1", requireApiKey);
+  // Health check (no account count to avoid info leak)
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+
   app.use("/admin", requireApiKey);
+  app.get("/admin/accounts", (_req, res) => {
+    res.json({
+      accounts: manager.getSnapshots(),
+      account_count: manager.accountCount,
+      generated_at: new Date().toISOString(),
+    });
+  });
 
-  // Routes — OpenAI compatible
-  app.post(
-    "/v1/chat/completions",
-    createChatCompletionsHandler(config, manager),
-  );
-  app.post("/v1/responses", createResponsesHandler(config, manager));
-
-  // Routes — Claude native passthrough
-  app.post(
-    "/v1/messages/count_tokens",
-    createCountTokensHandler(config, manager),
-  );
-  app.post("/v1/messages", createMessagesHandler(config, manager));
-
+  app.use("/v1", requireApiKey);
   app.get("/v1/models", (_req, res) => {
     res.json({
       object: "list",
@@ -156,18 +142,19 @@ export function createServer(
     });
   });
 
-  // Health check (no account count to avoid info leak)
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok" });
-  });
+  // Routes — OpenAI compatible
+  app.post(
+    "/v1/chat/completions",
+    createChatCompletionsHandler(config, manager),
+  );
+  app.post("/v1/responses", createResponsesHandler(config, manager));
 
-  app.get("/admin/accounts", (_req, res) => {
-    res.json({
-      accounts: manager.getSnapshots(),
-      account_count: manager.accountCount,
-      generated_at: new Date().toISOString(),
-    });
-  });
+  // Routes — Anthropic native passthrough
+  app.post("/v1/messages", createMessagesHandler(config, manager));
+  app.post(
+    "/v1/messages/count_tokens",
+    createCountTokensHandler(config, manager),
+  );
 
   return app;
 }

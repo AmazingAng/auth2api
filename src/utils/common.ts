@@ -2,6 +2,37 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
+export const timeout = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// ── API key extraction ──
+
+export function extractApiKey(headers: {
+  authorization?: string;
+  "x-api-key"?: string | string[];
+}): string {
+  const auth = headers.authorization;
+  if (auth?.startsWith("Bearer ")) {
+    return auth.slice(7);
+  }
+
+  const xApiKey = headers["x-api-key"];
+  if (typeof xApiKey === "string") {
+    return xApiKey;
+  }
+  if (Array.isArray(xApiKey) && xApiKey.length > 0) {
+    return xApiKey[0];
+  }
+
+  return "";
+}
+
+export function hashApiKey(apiKey: string): string {
+  return crypto.createHash("sha256").update(apiKey).digest("hex");
+}
+
+// ── Device ID ──
+
 /**
  * Persistent device_id — one per account, same as real Claude Code's
  * getOrCreateUserID() which generates once and saves to global config.
