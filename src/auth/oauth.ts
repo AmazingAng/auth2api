@@ -1,4 +1,5 @@
 import { PKCECodes, TokenData } from "./types";
+import { timeout } from "../utils/common";
 
 const AUTH_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
@@ -97,13 +98,12 @@ export async function refreshTokensWithRetry(
   refreshToken: string,
   maxRetries = 3,
 ): Promise<TokenData> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await refreshTokens(refreshToken);
     } catch (err) {
-      if (attempt === maxRetries) throw err;
-      await new Promise((r) => setTimeout(r, attempt * 1000));
+      if (attempt >= maxRetries) throw err;
+      await timeout(attempt * 1000);
     }
   }
-  throw new Error("Unreachable");
 }

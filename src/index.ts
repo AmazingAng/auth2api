@@ -53,7 +53,7 @@ async function doLogin(authDir: string, manual: boolean): Promise<void> {
       console.error("Error: No authorization code found in URL");
       process.exit(1);
     }
-    if (returnedState && returnedState !== state) {
+    if (returnedState !== state) {
       console.error("Error: State mismatch — possible CSRF attack");
       process.exit(1);
     }

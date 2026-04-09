@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { UsageData } from "../accounts/manager";
 
 function compactUuid(): string {
-  return compactUuid();
+  return uuidv4().replace(/-/g, "");
 }
 
 function formatChatUsage(
@@ -321,7 +321,7 @@ export function anthropicToOpenai(anthropicResp: any, model: string): any {
 export interface StreamState {
   chatId: string;
   model: string;
-  toolCalls: Map<number, { id: string; name: string; args: string }>;
+  toolCalls: Map<number, { id: string; name: string; args: string; openaiIndex: number }>;
   nextToolIndex: number;
   includeUsage: boolean;
 }
@@ -353,97 +353,83 @@ function makeChunk(
   });
 }
 
-export function anthropicStreamEventToOpenai(
-  event: string,
+type ChatSSEHandler = (
   data: any,
   state: StreamState,
   usage?: UsageData,
-): string[] {
-  const chunks: string[] = [];
+) => string[];
 
-  if (event === "message_start") {
-    chunks.push(makeChunk(state, { role: "assistant", content: "" }, null));
-    return chunks;
-  }
+const chatSSEHandlers: Record<string, ChatSSEHandler> = {
+  message_start: (_data, state) => [
+    makeChunk(state, { role: "assistant", content: "" }, null),
+  ],
 
-  if (event === "content_block_start") {
+  content_block_start: (data, state) => {
     const block = data.content_block;
-    if (block?.type === "tool_use") {
-      const idx = state.nextToolIndex++;
-      state.toolCalls.set(data.index, {
-        id: block.id,
-        name: block.name,
-        args: "",
-      });
-      chunks.push(
+    if (block?.type !== "tool_use") return [];
+    const idx = state.nextToolIndex++;
+    state.toolCalls.set(data.index, {
+      id: block.id,
+      name: block.name,
+      args: "",
+      openaiIndex: idx,
+    });
+    return [
+      makeChunk(
+        state,
+        {
+          tool_calls: [
+            {
+              index: idx,
+              id: block.id,
+              type: "function",
+              function: { name: block.name, arguments: "" },
+            },
+          ],
+        },
+        null,
+      ),
+    ];
+  },
+
+  content_block_delta: (data, state) => {
+    const deltaType = data.delta?.type;
+    if (deltaType === "text_delta") {
+      return [makeChunk(state, { content: data.delta.text }, null)];
+    }
+    if (deltaType === "thinking_delta") {
+      return [
+        makeChunk(state, { reasoning_content: data.delta.thinking }, null),
+      ];
+    }
+    if (deltaType === "input_json_delta") {
+      const tc = state.toolCalls.get(data.index);
+      if (!tc) return [];
+      tc.args += data.delta.partial_json;
+      return [
         makeChunk(
           state,
           {
             tool_calls: [
               {
-                index: idx,
-                id: block.id,
-                type: "function",
-                function: { name: block.name, arguments: "" },
+                index: tc.openaiIndex,
+                function: { arguments: data.delta.partial_json },
               },
             ],
           },
           null,
         ),
-      );
+      ];
     }
-    return chunks;
-  }
+    return [];
+  },
 
-  if (event === "content_block_delta") {
-    const deltaType = data.delta?.type;
+  message_delta: (data, state) => [
+    makeChunk(state, {}, mapStopReason(data.delta?.stop_reason || "end_turn")),
+  ],
 
-    if (deltaType === "text_delta") {
-      chunks.push(makeChunk(state, { content: data.delta.text }, null));
-    } else if (deltaType === "thinking_delta") {
-      chunks.push(
-        makeChunk(state, { reasoning_content: data.delta.thinking }, null),
-      );
-    } else if (deltaType === "input_json_delta") {
-      const tc = state.toolCalls.get(data.index);
-      if (tc) {
-        tc.args += data.delta.partial_json;
-        let tcIdx = 0;
-        for (const [blockIdx] of state.toolCalls) {
-          if (blockIdx === data.index) break;
-          tcIdx++;
-        }
-        chunks.push(
-          makeChunk(
-            state,
-            {
-              tool_calls: [
-                {
-                  index: tcIdx,
-                  function: { arguments: data.delta.partial_json },
-                },
-              ],
-            },
-            null,
-          ),
-        );
-      }
-    }
-    // redacted_thinking_delta — discard
-    return chunks;
-  }
-
-  if (event === "content_block_stop") {
-    return chunks;
-  }
-
-  if (event === "message_delta") {
-    const finishReason = mapStopReason(data.delta?.stop_reason || "end_turn");
-    chunks.push(makeChunk(state, {}, finishReason));
-    return chunks;
-  }
-
-  if (event === "message_stop") {
+  message_stop: (_data, state, usage) => {
+    const chunks: string[] = [];
     if (state.includeUsage && usage) {
       chunks.push(
         JSON.stringify({
@@ -462,9 +448,17 @@ export function anthropicStreamEventToOpenai(
     }
     chunks.push("[DONE]");
     return chunks;
-  }
+  },
+};
 
-  return chunks;
+export function anthropicSSEToChat(
+  event: string,
+  data: any,
+  state: StreamState,
+  usage?: UsageData,
+): string[] {
+  const handler = chatSSEHandlers[event];
+  return handler ? handler(data, state, usage) : [];
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -766,56 +760,47 @@ function formatSSE(data: { type: string; [key: string]: any }): string {
   return `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-export function anthropicSSEToResponses(
-  event: string,
+type ResponsesSSEHandler = (
   data: any,
   state: ResponsesStreamState,
   model: string,
   usage: UsageData,
-): string[] {
-  const out: string[] = [];
-  const nextSeq = () => ++state.seq;
+) => string[];
 
-  if (event === "message_start") {
-    out.push(
+const responsesSSEHandlers: Record<string, ResponsesSSEHandler> = {
+  message_start: (_data, state, model) => {
+    const nextSeq = () => ++state.seq;
+    const response = {
+      id: state.respId,
+      object: "response",
+      created_at: state.createdAt,
+      status: "in_progress",
+      model,
+      output: [],
+    };
+    return [
       formatSSE({
         type: "response.created",
         sequence_number: nextSeq(),
-        response: {
-          id: state.respId,
-          object: "response",
-          created_at: state.createdAt,
-          status: "in_progress",
-          model,
-          output: [],
-        },
+        response,
       }),
-    );
-    out.push(
       formatSSE({
         type: "response.in_progress",
         sequence_number: nextSeq(),
-        response: {
-          id: state.respId,
-          object: "response",
-          created_at: state.createdAt,
-          status: "in_progress",
-          model,
-          output: [],
-        },
+        response: { ...response },
       }),
-    );
-    return out;
-  }
+    ];
+  },
 
-  if (event === "content_block_start") {
+  content_block_start: (data, state) => {
+    const nextSeq = () => ++state.seq;
     const block = data.content_block;
     const idx = data.index;
 
     if (block?.type === "text") {
       state.inTextBlock = true;
       state.currentText = "";
-      out.push(
+      return [
         formatSSE({
           type: "response.output_item.added",
           sequence_number: nextSeq(),
@@ -828,8 +813,6 @@ export function anthropicSSEToResponses(
             content: [],
           },
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.content_part.added",
           sequence_number: nextSeq(),
@@ -838,12 +821,14 @@ export function anthropicSSEToResponses(
           content_index: 0,
           part: { type: "output_text", text: "", annotations: [] },
         }),
-      );
-    } else if (block?.type === "thinking") {
+      ];
+    }
+
+    if (block?.type === "thinking") {
       state.inThinkingBlock = true;
       state.currentThinkingText = "";
       state.currentReasoningId = `rs_${compactUuid()}`;
-      out.push(
+      return [
         formatSSE({
           type: "response.output_item.added",
           sequence_number: nextSeq(),
@@ -855,8 +840,6 @@ export function anthropicSSEToResponses(
             summary: [],
           },
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.reasoning_summary_part.added",
           sequence_number: nextSeq(),
@@ -865,20 +848,21 @@ export function anthropicSSEToResponses(
           summary_index: 0,
           part: { type: "summary_text", text: "" },
         }),
-      );
-    } else if (block?.type === "tool_use") {
+      ];
+    }
+
+    if (block?.type === "tool_use") {
       state.inToolBlock = true;
       state.currentToolId = block.id;
       state.currentToolName = block.name;
       state.currentToolArgs = "";
-      const fcId = `fc_${block.id}`;
-      out.push(
+      return [
         formatSSE({
           type: "response.output_item.added",
           sequence_number: nextSeq(),
           output_index: idx,
           item: {
-            id: fcId,
+            id: `fc_${block.id}`,
             type: "function_call",
             status: "in_progress",
             call_id: block.id,
@@ -886,18 +870,20 @@ export function anthropicSSEToResponses(
             arguments: "",
           },
         }),
-      );
+      ];
     }
-    return out;
-  }
 
-  if (event === "content_block_delta") {
+    return [];
+  },
+
+  content_block_delta: (data, state) => {
+    const nextSeq = () => ++state.seq;
     const deltaType = data.delta?.type;
     const idx = data.index;
 
     if (deltaType === "text_delta") {
       state.currentText += data.delta.text;
-      out.push(
+      return [
         formatSSE({
           type: "response.output_text.delta",
           sequence_number: nextSeq(),
@@ -906,10 +892,12 @@ export function anthropicSSEToResponses(
           content_index: 0,
           delta: data.delta.text,
         }),
-      );
-    } else if (deltaType === "thinking_delta") {
+      ];
+    }
+
+    if (deltaType === "thinking_delta") {
       state.currentThinkingText += data.delta.thinking;
-      out.push(
+      return [
         formatSSE({
           type: "response.reasoning_summary_text.delta",
           sequence_number: nextSeq(),
@@ -918,10 +906,12 @@ export function anthropicSSEToResponses(
           summary_index: 0,
           delta: data.delta.thinking,
         }),
-      );
-    } else if (deltaType === "input_json_delta") {
+      ];
+    }
+
+    if (deltaType === "input_json_delta") {
       state.currentToolArgs += data.delta.partial_json;
-      out.push(
+      return [
         formatSSE({
           type: "response.function_call_arguments.delta",
           sequence_number: nextSeq(),
@@ -929,14 +919,17 @@ export function anthropicSSEToResponses(
           output_index: idx,
           delta: data.delta.partial_json,
         }),
-      );
+      ];
     }
-    // redacted_thinking_delta — skip
-    return out;
-  }
 
-  if (event === "content_block_stop") {
+    return [];
+  },
+
+  content_block_stop: (data, state) => {
+    const nextSeq = () => ++state.seq;
     const idx = data.index;
+    const out: string[] = [];
+
     if (state.inTextBlock) {
       out.push(
         formatSSE({
@@ -947,8 +940,6 @@ export function anthropicSSEToResponses(
           content_index: 0,
           text: state.currentText,
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.content_part.done",
           sequence_number: nextSeq(),
@@ -961,8 +952,6 @@ export function anthropicSSEToResponses(
             annotations: [],
           },
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.output_item.done",
           sequence_number: nextSeq(),
@@ -988,21 +977,14 @@ export function anthropicSSEToResponses(
           summary_index: 0,
           text: state.currentThinkingText,
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.reasoning_summary_part.done",
           sequence_number: nextSeq(),
           item_id: state.currentReasoningId,
           output_index: idx,
           summary_index: 0,
-          part: {
-            type: "summary_text",
-            text: state.currentThinkingText,
-          },
+          part: { type: "summary_text", text: state.currentThinkingText },
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.output_item.done",
           sequence_number: nextSeq(),
@@ -1029,8 +1011,6 @@ export function anthropicSSEToResponses(
           output_index: idx,
           arguments: state.currentToolArgs,
         }),
-      );
-      out.push(
         formatSSE({
           type: "response.output_item.done",
           sequence_number: nextSeq(),
@@ -1048,11 +1028,13 @@ export function anthropicSSEToResponses(
       state.inToolBlock = false;
       state.currentToolArgs = "";
     }
-    return out;
-  }
 
-  if (event === "message_stop") {
-    out.push(
+    return out;
+  },
+
+  message_stop: (_data, state, model, usage) => {
+    const nextSeq = () => ++state.seq;
+    return [
       formatSSE({
         type: "response.completed",
         sequence_number: nextSeq(),
@@ -1070,15 +1052,18 @@ export function anthropicSSEToResponses(
           ),
         },
       }),
-    );
-    out.push(
-      formatSSE({
-        type: "response.done",
-        sequence_number: nextSeq(),
-      }),
-    );
-    return out;
-  }
+      formatSSE({ type: "response.done", sequence_number: nextSeq() }),
+    ];
+  },
+};
 
-  return out;
+export function anthropicSSEToResponses(
+  event: string,
+  data: any,
+  state: ResponsesStreamState,
+  model: string,
+  usage: UsageData,
+): string[] {
+  const handler = responsesSSEHandlers[event];
+  return handler ? handler(data, state, model, usage) : [];
 }

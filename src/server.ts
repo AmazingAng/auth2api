@@ -1,7 +1,7 @@
 import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { AccountManager } from "./accounts/manager";
-import { extractApiKey } from "./utils/api-key";
+import { extractApiKey } from "./utils/common";
 import {
   createChatCompletionsHandler,
   createResponsesHandler,

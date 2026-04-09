@@ -57,19 +57,31 @@ function getStainlessOs(): string {
  * after SESSION_TTL_MS of inactivity so repeated use still looks like a human
  * reopening their terminal periodically.
  */
-const sessionMap = new Map<string, string>();
+const SESSION_TTL_MIN = 30 * 60 * 1000; // 30 minutes
+const SESSION_TTL_MAX = 300 * 60 * 1000; // 300 minutes
+const sessionMap = new Map<
+  string,
+  { id: string; lastUsed: number; ttl: number }
+>();
 
-export function getSessionId(apiKeyHash: string): string {
-  const existing = sessionMap.get(apiKeyHash);
-  if (existing) return existing;
-  const id = crypto.randomUUID();
-  sessionMap.set(apiKeyHash, id);
-  return id;
+function randomTTL(): number {
+  return SESSION_TTL_MIN + Math.random() * (SESSION_TTL_MAX - SESSION_TTL_MIN);
 }
 
-/** Force-rotate session for a given API key. */
-export function resetSessionId(apiKeyHash: string): void {
-  sessionMap.delete(apiKeyHash);
+export function getSessionId(apiKeyHash: string): string {
+  const now = Date.now();
+  const entry = sessionMap.get(apiKeyHash);
+  if (entry && now - entry.lastUsed < entry.ttl) {
+    entry.lastUsed = now;
+    return entry.id;
+  }
+  // Clean up expired sessions
+  for (const [key, val] of sessionMap) {
+    if (now - val.lastUsed >= val.ttl) sessionMap.delete(key);
+  }
+  const id = crypto.randomUUID();
+  sessionMap.set(apiKeyHash, { id, lastUsed: now, ttl: randomTTL() });
+  return id;
 }
 
 /** Default values */

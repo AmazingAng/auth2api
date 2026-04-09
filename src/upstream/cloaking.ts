@@ -99,6 +99,7 @@ export function applyCloaking(
   cloaking: CloakingConfig,
   overrideSessionId?: string,
 ): any {
+  body = structuredClone(body);
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
 

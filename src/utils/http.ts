@@ -1,4 +1,5 @@
 import { Response as ExpressResponse } from "express";
+import { timeout } from "./common";
 import {
   AccountFailureKind,
   AccountManager,
@@ -35,92 +36,72 @@ const FAILURE_RESPONSES: Record<
 };
 
 export function accountUnavailable(
-  res: ExpressResponse,
+  resp: ExpressResponse,
   result: Extract<AccountResult, { account: null }>,
 ): void {
   const { failureKind, retryAfterMs } = result;
 
   if (!failureKind) {
-    res.status(503).json({ error: { message: "No available account" } });
+    resp.status(503).json({ error: { message: "No available account" } });
     return;
   }
 
   const { status, message } = FAILURE_RESPONSES[failureKind];
   if (retryAfterMs && retryAfterMs > 0) {
-    res.setHeader(
+    resp.setHeader(
       "Retry-After",
       Math.max(1, Math.ceil(retryAfterMs / 1000)).toString(),
     );
   }
-  res.status(status).json({ error: { message } });
+  resp.status(status).json({ error: { message } });
 }
 
-function forwardErrorResponse(
-  res: ExpressResponse,
-  status: number,
-  body: string,
-): void {
-  try {
-    const parsed = body ? JSON.parse(body) : null;
-    if (parsed && typeof parsed === "object") {
-      res.status(status).json(parsed);
-    } else {
-      res
-        .status(status)
-        .json({ error: { message: "Upstream request failed" } });
-    }
-  } catch {
-    res.status(status).json({ error: { message: "Upstream request failed" } });
-  }
-}
-
-export interface ProxyCallbacks {
-  callUpstream: (account: AvailableAccount) => Promise<Response>;
-  handleSuccess: (
-    upstreamResp: Response,
-    account: AvailableAccount,
-  ) => Promise<void>;
+export interface ProxyOptions {
+  upstream: (account: AvailableAccount) => Promise<Response>;
+  success: (upstreamResp: Response, account: AvailableAccount) => Promise<void>;
   logPrefix: string;
+  maxRetries?: number;
 }
 
 export async function proxyWithRetry(
-  res: ExpressResponse,
+  resp: ExpressResponse,
   config: Config,
   manager: AccountManager,
-  callbacks: ProxyCallbacks,
+  options: ProxyOptions,
 ): Promise<void> {
+  const maxRetries = options.maxRetries ?? MAX_RETRIES;
   let lastStatus = 500;
   let lastErrBody = "";
   const refreshedAccounts = new Set<string>();
 
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     const result = manager.getNextAccount();
     if (!result.account) {
-      return accountUnavailable(res, result);
+      return accountUnavailable(resp, result);
     }
     const account = result.account;
     manager.recordAttempt(account.token.email);
 
     let upstreamResp: Response;
     try {
-      upstreamResp = await callbacks.callUpstream(account);
+      upstreamResp = await options.upstream(account);
     } catch (err: any) {
       manager.recordFailure(account.token.email, "network", err.message);
       if (isDebugLevel(config.debug, "errors")) {
         console.error(
-          `${callbacks.logPrefix} attempt ${attempt + 1} network failure: ${err.message}`,
+          `${options.logPrefix} attempt ${attempt + 1} network failure: ${err.message}`,
         );
       }
-      if (attempt < MAX_RETRIES - 1) {
-        await new Promise((r) => setTimeout(r, (attempt + 1) * 1000));
+      if (attempt < maxRetries - 1) {
+        await timeout((attempt + 1) * 1000);
         continue;
       }
-      res.status(502).json({ error: { message: "Upstream network error" } });
+      resp.status(502).json({ error: { message: "Upstream network error" } });
       return;
     }
 
     if (upstreamResp.ok) {
-      await callbacks.handleSuccess(upstreamResp, account);
+      await options.success(upstreamResp, account);
       return;
     }
 
@@ -129,7 +110,7 @@ export async function proxyWithRetry(
       lastErrBody = await upstreamResp.text();
       if (isDebugLevel(config.debug, "errors")) {
         console.error(
-          `${callbacks.logPrefix} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
+          `${options.logPrefix} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
         );
       }
     } catch {
@@ -148,10 +129,23 @@ export async function proxyWithRetry(
     }
 
     if (!RETRYABLE_STATUSES.has(lastStatus)) break;
-    if (attempt < MAX_RETRIES - 1) {
-      await new Promise((r) => setTimeout(r, (attempt + 1) * 1000));
+    if (attempt < maxRetries - 1) {
+      await timeout((attempt + 1) * 1000);
     }
   }
 
-  forwardErrorResponse(res, lastStatus, lastErrBody);
+  try {
+    const parsed = lastErrBody ? JSON.parse(lastErrBody) : null;
+    if (parsed && typeof parsed === "object") {
+      resp.status(lastStatus).json(parsed);
+    } else {
+      resp
+        .status(lastStatus)
+        .json({ error: { message: "Upstream request failed" } });
+    }
+  } catch {
+    resp
+      .status(lastStatus)
+      .json({ error: { message: "Upstream request failed" } });
+  }
 }

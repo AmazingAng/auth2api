@@ -1,5 +1,5 @@
 import { Request, Response as ExpressResponse } from "express";
-import { extractApiKey, hashApiKey } from "../utils/api-key";
+import { extractApiKey, hashApiKey } from "../utils/common";
 import { Config, isDebugLevel } from "../config";
 import { AccountManager, extractUsage } from "../accounts/manager";
 import { proxyWithRetry } from "../utils/http";
@@ -8,7 +8,7 @@ import {
   openaiToAnthropic,
   anthropicToOpenai,
   createStreamState,
-  anthropicStreamEventToOpenai,
+  anthropicSSEToChat,
   responsesToAnthropic,
   anthropicToResponses,
   makeResponsesState,
@@ -23,7 +23,7 @@ export function createChatCompletionsHandler(
   config: Config,
   manager: AccountManager,
 ) {
-  return async (req: Request, res: ExpressResponse): Promise<void> => {
+  return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
       const body = req.body;
       if (
@@ -31,7 +31,7 @@ export function createChatCompletionsHandler(
         !Array.isArray(body.messages) ||
         body.messages.length === 0
       ) {
-        res.status(400).json({
+        resp.status(400).json({
           error: {
             message: "messages is required and must be a non-empty array",
           },
@@ -51,11 +51,11 @@ export function createChatCompletionsHandler(
         console.log(JSON.stringify(translatedBody, null, 2));
       }
 
-      await proxyWithRetry(res, config, manager, {
+      await proxyWithRetry(resp, config, manager, {
         logPrefix: "ChatCompletions",
-        callUpstream: (account) => {
+        upstream: (account) => {
           const anthropicBody = applyCloaking(
-            structuredClone(translatedBody),
+            translatedBody,
             account.deviceId,
             account.accountUuid,
             apiKeyHash,
@@ -70,19 +70,18 @@ export function createChatCompletionsHandler(
             apiKeyHash,
           );
         },
-        handleSuccess: async (upstreamResp, account) => {
+        success: async (upstreamResp, account) => {
           if (stream) {
             const includeUsage = body.stream_options?.include_usage !== false;
             const state = createStreamState(model, includeUsage);
             const streamResp = await handleStreamingResponse(
               upstreamResp,
-              res,
+              resp,
               {
                 onEvent: (event, data, usage) =>
-                  anthropicStreamEventToOpenai(event, data, state, usage)
-                    .filter((c) => c !== "[DONE]")
-                    .map((c) => `data: ${c}\n\n`),
-                finalChunk: "data: [DONE]\n\n",
+                  anthropicSSEToChat(event, data, state, usage).map(
+                    (c) => `data: ${c}\n\n`,
+                  ),
               },
             );
             if (streamResp.completed) {
@@ -100,13 +99,13 @@ export function createChatCompletionsHandler(
               account.token.email,
               extractUsage(anthropicResp),
             );
-            res.json(anthropicToOpenai(anthropicResp, model));
+            resp.json(anthropicToOpenai(anthropicResp, model));
           }
         },
       });
     } catch (err: any) {
       console.error("Handler error:", err.message);
-      res.status(500).json({ error: { message: "Internal server error" } });
+      resp.status(500).json({ error: { message: "Internal server error" } });
     }
   };
 }
@@ -116,11 +115,11 @@ export function createResponsesHandler(
   config: Config,
   manager: AccountManager,
 ) {
-  return async (req: Request, res: ExpressResponse): Promise<void> => {
+  return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
       const body = req.body;
       if (!body.input && !body.messages) {
-        res.status(400).json({ error: { message: "input is required" } });
+        resp.status(400).json({ error: { message: "input is required" } });
         return;
       }
 
@@ -129,11 +128,11 @@ export function createResponsesHandler(
       const apiKeyHash = hashApiKey(extractApiKey(req.headers));
       const translatedBody = responsesToAnthropic(body);
 
-      await proxyWithRetry(res, config, manager, {
+      await proxyWithRetry(resp, config, manager, {
         logPrefix: "Responses",
-        callUpstream: (account) => {
+        upstream: (account) => {
           const anthropicBody = applyCloaking(
-            structuredClone(translatedBody),
+            translatedBody,
             account.deviceId,
             account.accountUuid,
             apiKeyHash,
@@ -148,12 +147,12 @@ export function createResponsesHandler(
             apiKeyHash,
           );
         },
-        handleSuccess: async (upstreamResp, account) => {
+        success: async (upstreamResp, account) => {
           if (stream) {
             const state = makeResponsesState();
             const streamResp = await handleStreamingResponse(
               upstreamResp,
-              res,
+              resp,
               {
                 onEvent: (event, data, usage) =>
                   anthropicSSEToResponses(event, data, state, model, usage),
@@ -174,13 +173,13 @@ export function createResponsesHandler(
               account.token.email,
               extractUsage(anthropicResp),
             );
-            res.json(anthropicToResponses(anthropicResp, model));
+            resp.json(anthropicToResponses(anthropicResp, model));
           }
         },
       });
     } catch (err: any) {
       console.error("Responses handler error:", err.message);
-      res.status(500).json({ error: { message: "Internal server error" } });
+      resp.status(500).json({ error: { message: "Internal server error" } });
     }
   };
 }

@@ -1,7 +1,7 @@
 import { TokenData } from "../auth/types";
 import { refreshTokensWithRetry } from "../auth/oauth";
 import { saveToken, loadAllTokens } from "../auth/token-storage";
-import { getDeviceId } from "../utils/cloak-utils";
+import { getDeviceId } from "../utils/common";
 
 const REFRESH_LEAD_MS = 4 * 60 * 60 * 1000; // 4 hours before expiry
 const REFRESH_CHECK_INTERVAL_MS = 60 * 1000; // check every 60s
