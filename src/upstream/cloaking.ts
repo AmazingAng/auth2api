@@ -101,10 +101,37 @@ export interface CloakingOptions {
   config: Config;
 }
 
+/**
+ * Remove thinking blocks with empty `thinking` field from message history.
+ *
+ * When Claude Code compacts context or restores a session, it may preserve
+ * the thinking block skeleton but clear the content, resulting in
+ * `{ type: "thinking", thinking: "", signature: "" }`. The Anthropic API
+ * rejects these with HTTP 400 "each thinking block must contain thinking".
+ */
+function sanitizeMessages(messages: any[]): any[] {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((msg) => {
+    if (!Array.isArray(msg.content)) return msg;
+    const filtered = msg.content.filter((block: any) => {
+      if (block.type === "thinking") {
+        return typeof block.thinking === "string" && block.thinking.length > 0;
+      }
+      return true;
+    });
+    return { ...msg, content: filtered };
+  });
+}
+
 export function applyCloaking(options: CloakingOptions): any {
   const { request, account, config } = options;
   const body = structuredClone(options.body ?? request.body);
   const cloaking = config.cloaking;
+
+  // Strip empty thinking blocks before forwarding to upstream API
+  if (Array.isArray(body.messages)) {
+    body.messages = sanitizeMessages(body.messages);
+  }
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
 
