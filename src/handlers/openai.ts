@@ -68,7 +68,10 @@ export function createChatCompletionsHandler(
             structured,
           });
         },
-        success: async (upstream, account) => {
+        success: async (upstream, account, rateLimitHeaders) => {
+          for (const [k, v] of Object.entries(rateLimitHeaders)) {
+            resp.setHeader(k, v);
+          }
           if (stream) {
             const includeUsage = body.stream_options?.include_usage !== false;
             const state = createStreamState(model, includeUsage);
@@ -140,7 +143,10 @@ export function createResponsesHandler(
             structured,
           });
         },
-        success: async (upstream, account) => {
+        success: async (upstream, account, rateLimitHeaders) => {
+          for (const [k, v] of Object.entries(rateLimitHeaders)) {
+            resp.setHeader(k, v);
+          }
           if (stream) {
             const state = makeResponsesState();
             const streamResp = await handleStreamingResponse(upstream, resp, {

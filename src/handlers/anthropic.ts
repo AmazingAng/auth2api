@@ -48,7 +48,10 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             config,
           });
         },
-        success: async (upstream, account) => {
+        success: async (upstream, account, rateLimitHeaders) => {
+          for (const [k, v] of Object.entries(rateLimitHeaders)) {
+            resp.setHeader(k, v);
+          }
           if (stream) {
             const result = await handleStreamingResponse(upstream, resp);
             if (result.completed) {
@@ -87,7 +90,10 @@ export function createCountTokensHandler(
       await proxyWithRetry("CountTokens", resp, config, manager, {
         upstream: (account) =>
           callAnthropicCountTokens({ request: req, account, config }),
-        success: async (upstream, account) => {
+        success: async (upstream, account, rateLimitHeaders) => {
+          for (const [k, v] of Object.entries(rateLimitHeaders)) {
+            resp.setHeader(k, v);
+          }
           manager.recordSuccess(account.token.email);
           const data = await upstream.json();
           resp.json(data);
