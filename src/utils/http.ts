@@ -7,6 +7,10 @@ import {
   AvailableAccount,
 } from "../accounts/manager";
 import { Config, isDebugLevel } from "../config";
+import {
+  extractRateLimitHeaders,
+  buildDownstreamRateLimitHeaders,
+} from "../upstream/ratelimit";
 
 export const MAX_RETRIES = 3;
 export const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -58,7 +62,11 @@ export function accountUnavailable(
 
 export interface ProxyOptions {
   upstream: (account: AvailableAccount) => Promise<Response>;
-  success: (upstream: Response, account: AvailableAccount) => Promise<void>;
+  success: (
+    upstream: Response,
+    account: AvailableAccount,
+    rateLimitHeaders: Record<string, string>,
+  ) => Promise<void>;
   maxRetries?: number;
 }
 
@@ -72,6 +80,7 @@ export async function proxyWithRetry(
   const maxRetries = options.maxRetries ?? MAX_RETRIES;
   let lastStatus = 500;
   let lastErrBody = "";
+  let lastRlHeaders: Record<string, string> = {};
   const refreshedAccounts = new Set<string>();
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -100,8 +109,17 @@ export async function proxyWithRetry(
       return;
     }
 
+    // Extract rate limit info from every upstream response (success or failure)
+    const rlInfo = extractRateLimitHeaders(upstream);
+    if (rlInfo) {
+      manager.recordRateLimit(account.token.email, rlInfo);
+    }
+    const anonymousId = manager.getAnonymousId(account.token.email);
+    const rlHeaders = buildDownstreamRateLimitHeaders(upstream, anonymousId);
+    lastRlHeaders = rlHeaders;
+
     if (upstream.ok) {
-      await options.success(upstream, account);
+      await options.success(upstream, account, rlHeaders);
       return;
     }
 
@@ -132,6 +150,11 @@ export async function proxyWithRetry(
     if (attempt < maxRetries - 1) {
       await timeout((attempt + 1) * 1000);
     }
+  }
+
+  // Inject rate limit headers on final failure response
+  for (const [k, v] of Object.entries(lastRlHeaders)) {
+    resp.setHeader(k, v);
   }
 
   try {

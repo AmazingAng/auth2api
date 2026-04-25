@@ -1,7 +1,12 @@
+import crypto from "crypto";
 import { TokenData } from "../auth/types";
 import { refreshTokensWithRetry } from "../auth/oauth";
 import { saveToken, loadAllTokens } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
+import {
+  RateLimitInfo,
+  getEffectiveUtilization,
+} from "../upstream/ratelimit";
 
 const REFRESH_LEAD_MS = 4 * 60 * 60 * 1000; // 4 hours before expiry
 const REFRESH_CHECK_INTERVAL_MS = 60 * 1000; // check every 60s
@@ -58,10 +63,12 @@ interface AccountState {
   totalCacheReadInputTokens: number;
   refreshing: boolean;
   refreshPromise: Promise<boolean> | null;
+  rateLimit: RateLimitInfo | null;
 }
 
 export interface AccountSnapshot {
   email: string;
+  anonymousId: string;
   available: boolean;
   cooldownUntil: number;
   failureCount: number;
@@ -78,6 +85,7 @@ export interface AccountSnapshot {
   totalCacheReadInputTokens: number;
   expiresAt: string;
   refreshing: boolean;
+  rateLimit: RateLimitInfo | null;
 }
 
 export interface AvailableAccount {
@@ -168,9 +176,12 @@ export class AccountManager {
   }
 
   /**
-   * Sticky account selection. Keeps using the same account for STICKY_DURATION_MS
-   * before rotating to the next one. Rotates early only when the current account
-   * enters cooldown (e.g. rate-limited).
+   * Utilization-aware sticky account selection.
+   *
+   * Priority: cooldown > utilization > round-robin.
+   * Keeps using the same account while it's not in cooldown and its
+   * effective utilization is below 0.8. Rotates to the lowest-utilization
+   * account when the sticky one expires, enters cooldown, or gets too hot.
    */
   getNextAccount(): AccountResult {
     const count = this.accountOrder.length;
@@ -180,30 +191,68 @@ export class AccountManager {
 
     const now = Date.now();
 
-    // Try to keep using the current sticky account
+    // Try to keep using the current sticky account if healthy and cool
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (
+        acct.cooldownUntil <= now &&
+        getEffectiveUtilization(acct.rateLimit) < 0.8
+      ) {
         return {
           account: buildAvailableAccount(this.authDir, email, acct.token),
         };
       }
     }
 
-    // Pick the next available account
-    const startIdx = this.lastUsedIndex >= 0 ? this.lastUsedIndex + 1 : 0;
+    // Collect all available (not in cooldown) accounts
+    const available: { idx: number; email: string; util: number }[] = [];
+    let anyHasRateLimit = false;
+
     for (let i = 0; i < count; i++) {
-      const idx = (startIdx + i) % count;
-      const email = this.accountOrder[idx];
+      const email = this.accountOrder[i];
       const acct = this.accounts.get(email)!;
       if (acct.cooldownUntil <= now) {
-        this.lastUsedIndex = idx;
-        this.stickyUntil = now + randomStickyDuration();
-        return {
-          account: buildAvailableAccount(this.authDir, email, acct.token),
-        };
+        const util = getEffectiveUtilization(acct.rateLimit);
+        if (acct.rateLimit) anyHasRateLimit = true;
+        available.push({ idx: i, email, util });
       }
+    }
+
+    if (available.length > 0) {
+      let chosen: (typeof available)[0];
+
+      if (!anyHasRateLimit) {
+        // No rate limit data yet (cold start) — fall back to round-robin
+        const startIdx = this.lastUsedIndex >= 0 ? this.lastUsedIndex + 1 : 0;
+        chosen = available[0];
+        for (const a of available) {
+          if (
+            (a.idx - startIdx + count) % count <
+            (chosen.idx - startIdx + count) % count
+          ) {
+            chosen = a;
+          }
+        }
+      } else {
+        // Pick the account with the lowest utilization
+        chosen = available[0];
+        for (let i = 1; i < available.length; i++) {
+          if (available[i].util < chosen.util) {
+            chosen = available[i];
+          }
+        }
+      }
+
+      this.lastUsedIndex = chosen.idx;
+      this.stickyUntil = now + randomStickyDuration();
+      return {
+        account: buildAvailableAccount(
+          this.authDir,
+          chosen.email,
+          this.accounts.get(chosen.email)!.token,
+        ),
+      };
     }
 
     // All accounts in cooldown — find the most recoverable one
@@ -230,6 +279,39 @@ export class AccountManager {
       failureKind: bestKind,
       retryAfterMs: isRecoverable ? bestRemainingMs : null,
     };
+  }
+
+  getAnonymousId(email: string): string {
+    const hash = crypto
+      .createHash("sha256")
+      .update(email)
+      .digest("hex")
+      .slice(0, 8);
+    return `account-${hash}`;
+  }
+
+  recordRateLimit(email: string, info: RateLimitInfo): void {
+    const acct = this.accounts.get(email);
+    if (!acct) return;
+
+    acct.rateLimit = info;
+
+    const util = getEffectiveUtilization(info);
+    const id = this.getAnonymousId(email);
+
+    if (info.unifiedStatus === "throttled") {
+      console.error(
+        `[THROTTLED] ${id} is being throttled (${info.representativeClaim})`,
+      );
+    } else if (util >= 0.95) {
+      console.error(
+        `[RATE LIMIT] ${id} utilization critical: ${(util * 100).toFixed(1)}%`,
+      );
+    } else if (util >= 0.8) {
+      console.warn(
+        `[RATE LIMIT] ${id} utilization high: ${(util * 100).toFixed(1)}%`,
+      );
+    }
   }
 
   recordAttempt(email: string): void {
@@ -301,6 +383,7 @@ export class AccountManager {
     for (const acct of this.accounts.values()) {
       snapshots.push({
         email: acct.token.email,
+        anonymousId: this.getAnonymousId(acct.token.email),
         available: acct.cooldownUntil <= now,
         cooldownUntil: acct.cooldownUntil,
         failureCount: acct.failureCount,
@@ -317,6 +400,7 @@ export class AccountManager {
         totalCacheReadInputTokens: acct.totalCacheReadInputTokens,
         expiresAt: acct.token.expiresAt,
         refreshing: acct.refreshing,
+        rateLimit: acct.rateLimit,
       });
     }
     return snapshots;
@@ -448,6 +532,7 @@ export class AccountManager {
       totalCacheReadInputTokens: 0,
       refreshing: false,
       refreshPromise: null,
+      rateLimit: null,
     };
   }
 }
