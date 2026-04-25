@@ -2,11 +2,11 @@
 
 [English](./README.md)
 
-一个轻量级、单账号的 Claude OAuth 转 API 代理，适合 Claude Code 和 OpenAI 兼容客户端。
+一个轻量级的 Claude OAuth 转 API 代理，适合 Claude Code 和 OpenAI 兼容客户端。
 
 auth2api 的定位很克制，也很明确：
 
-- 一个 Claude OAuth 账号
+- 一个或多个 Claude OAuth 账号
 - 一个本地或自托管代理
 - 一个目标：把 Claude OAuth 登录态变成可调用的 API
 
@@ -14,14 +14,16 @@ auth2api 的定位很克制，也很明确：
 
 ## 功能特性
 
-- **轻量优先**：代码量小、单账号架构、依赖和运行逻辑都尽量简单
-- **Claude OAuth 转 API**：把一个 Claude OAuth 登录账号作为 API 代理账号使用
-- **OpenAI 兼容 API**：支持 `/v1/chat/completions`、`/v1/responses`、`/v1/models`
-- **Claude 原生透传**：支持 `/v1/messages` 与 `/v1/messages/count_tokens`
-- **适配 Claude Code**：兼容 `Authorization: Bearer` 和 `x-api-key`
-- **覆盖核心能力**：支持流式、工具调用、图片与 reasoning，而不引入大型框架
-- **单账号健康管理**：内置 cooldown、重试、token 刷新和 `/admin/accounts` 状态查看
-- **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
+- **轻量优先** — 代码量小、依赖和运行逻辑都尽量简单
+- **Claude OAuth 转 API** — 把 Claude OAuth 登录账号作为 API 代理账号使用
+- **多账号支持** — 支持加载多个 OAuth token，具备粘性路由、自动故障转移和逐账号用量统计
+- **OpenAI 兼容 API** — 支持 `/v1/chat/completions`、`/v1/responses`、`/v1/models`
+- **Claude 原生透传** — 支持 `/v1/messages` 与 `/v1/messages/count_tokens`
+- **适配 Claude Code** — 兼容 `Authorization: Bearer` 和 `x-api-key`
+- **覆盖核心能力** — 支持流式、工具调用、图片与 reasoning，而不引入大型框架
+- **结构化 JSON 输出** — 支持 `response_format`（Chat API）和 `text.format`（Responses API）的结构化输出
+- **健康管理** — 内置逐账号的 cooldown、重试、token 刷新和 `/admin/accounts` 状态查看
+- **默认安全设置** — timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
 
 ## 运行要求
 
@@ -55,6 +57,8 @@ node dist/index.js --login --manual
 
 在浏览器中打开输出的链接。授权完成后，浏览器会跳转到一个 `localhost` 地址，这个页面可能无法打开；请把地址栏中的完整 URL 复制回终端。
 
+可以多次执行 `--login` 来添加更多账号，每个账号的 token 会作为独立文件存储在 auth 目录中。
+
 ## 启动服务
 
 ```bash
@@ -62,8 +66,6 @@ node dist/index.js
 ```
 
 默认监听地址为 `http://127.0.0.1:8317`。首次启动时，如果 `config.yaml` 中没有配置 API key，会自动生成并写入该文件。
-
-如果上游因为限流导致当前账号进入 cooldown，auth2api 会返回 `429 Rate limited on the configured account`，而不是通用的 `503`。
 
 ## 配置
 
@@ -80,29 +82,20 @@ api-keys:
 
 body-limit: "200mb"       # 最大 JSON 请求体大小，适合大上下文场景
 
+timeouts:
+  messages-ms: 120000         # 非流式 /v1/messages 超时
+  stream-messages-ms: 600000  # 流式 /v1/messages 超时（10 分钟，适合 Claude Code 长任务）
+  count-tokens-ms: 30000      # /v1/messages/count_tokens 超时
+
+# 请求指纹 — 控制 auth2api 如何模拟 Claude Code CLI
 cloaking:
-  mode: "auto"            # auto | always | never
-  strict-mode: false
-  sensitive-words: []
-  cache-user-id: false
+  cli-version: "2.1.88"   # 模拟的 CLI 版本号
+  entrypoint: "cli"        # 计费归属入口（cli、mcp、sdk 等）
 
 debug: "off"            # off | errors | verbose
 ```
 
-如果你要跑较长的 Claude Code 任务，也可以单独配置上游超时：
-
-```yaml
-timeouts:
-  messages-ms: 120000
-  stream-messages-ms: 600000
-  count-tokens-ms: 30000
-```
-
-默认情况下，流式上游请求会允许持续 10 分钟后才会被 auth2api 主动中断。
-
-默认请求体大小限制现在是 `200mb`，比之前固定的 `20mb` 更适合 Claude Code 的大上下文使用场景。
-
-`debug` 现在支持三级日志：
+`debug` 支持三级日志：
 - `off`：不输出额外调试日志
 - `errors`：记录上游/网络失败信息和上游错误响应正文
 - `verbose`：在 `errors` 基础上，再输出每个请求的方法、路径、状态码和耗时
@@ -182,28 +175,30 @@ claude
 
 Claude Code 使用的是原生 `/v1/messages` 接口，auth2api 会直接透传。`Authorization: Bearer` 与 `x-api-key` 两种认证头都支持。
 
-## 单账号模式
+## 多账号
 
-当前版本仅支持一个 Claude OAuth 账号。
+auth2api 支持多个 Claude OAuth 账号，每个账号的 token 作为独立文件存储在 auth 目录中。
 
-- 再次执行 `--login` 时，如果还是同一个账号，会更新已保存的 token
-- 如果本地已保存的是另一个账号，auth2api 会拒绝覆盖，并要求你先删除旧 token
-- 如果 token 目录中存在多个 token 文件，auth2api 会直接报错并退出，直到你清理多余文件
+- 每执行一次 `--login` 可以添加一个账号的 token
+- 请求使用粘性选择策略 — 同一个账号会被持续使用，直到触发 cooldown
+- 当遇到限流或故障时，auth2api 会自动切换到下一个可用账号
+- 逐账号追踪 token 用量（输入、输出、缓存），并定期输出日志
+- 通过 `/admin/accounts` 可查看所有账号的状态
 
 ## 管理状态
 
-你可以通过 `/admin/accounts` 查看当前账号状态：
+通过 `/admin/accounts` 查看所有账号状态：
 
 ```bash
 curl http://127.0.0.1:8317/admin/accounts \
   -H "Authorization: Bearer <your-api-key>"
 ```
 
-返回内容包含账号是否可用、cooldown 截止时间、失败计数、最近刷新时间以及基础请求统计。
+返回内容包含逐账号的可用状态、cooldown 截止时间、失败计数、最近刷新时间、token 用量和请求统计。
 
-## Smoke 测试
+## 测试
 
-仓库内置了一套最小自动化 smoke test，并使用 mocked upstream response，因此不会调用真实 Claude 服务：
+仓库内置了测试套件，使用 mocked upstream response，不会调用真实 Claude 服务：
 
 ```bash
 npm run test:smoke

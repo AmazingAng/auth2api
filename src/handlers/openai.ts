@@ -74,9 +74,7 @@ export function createChatCompletionsHandler(
             const state = createStreamState(model, includeUsage);
             const result = await handleStreamingResponse(upstream, resp, {
               onEvent: (event, data, usage) =>
-                anthropicSSEToChat(event, data, state, usage).map(
-                  (c) => `data: ${c}\n\n`,
-                ),
+                anthropicSSEToChat(event, data, state, usage),
             });
             if (result.completed) {
               manager.recordSuccess(account.token.email, result.usage);

@@ -414,6 +414,11 @@ test("anthropicToOpenai includes usage details", () => {
 // translator.ts — Chat SSE streaming
 // ══════════════════════════════════════════════════
 
+function parseChatSSE(chunk: string): any {
+  const json = chunk.replace(/^data: /, "").trim();
+  return JSON.parse(json);
+}
+
 test("anthropicSSEToChat handles message_start", () => {
   const state = createStreamState("sonnet", false);
   const chunks = anthropicSSEToChat(
@@ -422,7 +427,7 @@ test("anthropicSSEToChat handles message_start", () => {
     state,
   );
   assert.equal(chunks.length, 1);
-  const parsed = JSON.parse(chunks[0]);
+  const parsed = parseChatSSE(chunks[0]);
   assert.equal(parsed.choices[0].delta.role, "assistant");
 });
 
@@ -434,7 +439,7 @@ test("anthropicSSEToChat handles text_delta", () => {
     state,
   );
   assert.equal(chunks.length, 1);
-  const parsed = JSON.parse(chunks[0]);
+  const parsed = parseChatSSE(chunks[0]);
   assert.equal(parsed.choices[0].delta.content, "Hello");
 });
 
@@ -445,7 +450,7 @@ test("anthropicSSEToChat handles thinking_delta", () => {
     { delta: { type: "thinking_delta", thinking: "Let me think..." } },
     state,
   );
-  const parsed = JSON.parse(chunks[0]);
+  const parsed = parseChatSSE(chunks[0]);
   assert.equal(parsed.choices[0].delta.reasoning_content, "Let me think...");
 });
 
@@ -459,12 +464,12 @@ test("anthropicSSEToChat handles message_stop with usage", () => {
   };
   const chunks = anthropicSSEToChat("message_stop", {}, state, usage);
   assert.equal(chunks.length, 2); // usage chunk + [DONE]
-  const usageChunk = JSON.parse(chunks[0]);
+  const usageChunk = parseChatSSE(chunks[0]);
   assert.deepEqual(usageChunk.choices, []);
   assert.equal(usageChunk.usage.prompt_tokens, 10);
   assert.equal(usageChunk.usage.completion_tokens, 5);
   assert.equal(usageChunk.usage.prompt_tokens_details.cached_tokens, 2);
-  assert.equal(chunks[1], "[DONE]");
+  assert.equal(chunks[1], "data: [DONE]\n\n");
 });
 
 test("anthropicSSEToChat skips usage when includeUsage is false", () => {
@@ -477,7 +482,7 @@ test("anthropicSSEToChat skips usage when includeUsage is false", () => {
   };
   const chunks = anthropicSSEToChat("message_stop", {}, state, usage);
   assert.equal(chunks.length, 1);
-  assert.equal(chunks[0], "[DONE]");
+  assert.equal(chunks[0], "data: [DONE]\n\n");
 });
 
 test("anthropicSSEToChat handles tool_use streaming", () => {
@@ -490,7 +495,7 @@ test("anthropicSSEToChat handles tool_use streaming", () => {
     state,
   );
   assert.equal(startChunks.length, 1);
-  const startParsed = JSON.parse(startChunks[0]);
+  const startParsed = parseChatSSE(startChunks[0]);
   assert.equal(startParsed.choices[0].delta.tool_calls[0].id, "call_1");
   assert.equal(startParsed.choices[0].delta.tool_calls[0].index, 0);
 
@@ -501,7 +506,7 @@ test("anthropicSSEToChat handles tool_use streaming", () => {
     state,
   );
   assert.equal(deltaChunks.length, 1);
-  const deltaParsed = JSON.parse(deltaChunks[0]);
+  const deltaParsed = parseChatSSE(deltaChunks[0]);
   assert.equal(
     deltaParsed.choices[0].delta.tool_calls[0].function.arguments,
     '{"city"',

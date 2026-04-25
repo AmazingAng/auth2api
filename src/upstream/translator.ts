@@ -53,6 +53,7 @@ export function resolveModel(model: string): string {
 
 const EFFORT_TO_BUDGET: Record<string, number> = {
   none: 0,
+  minimal: 512,
   low: 1024,
   medium: 8192,
   high: 24576,
@@ -171,7 +172,10 @@ export function openaiToAnthropic(body: any): any {
     applyThinking(anthropicBody, body.reasoning_effort);
   }
 
-  // response_format → output_config
+  const messages: any[] = [];
+  const systemParts: any[] = [];
+
+  // response_format → output_config or system hint
   if (body.response_format) {
     const fmt = body.response_format;
     if (fmt.type === "json_schema" && fmt.json_schema) {
@@ -182,14 +186,17 @@ export function openaiToAnthropic(body: any): any {
           name: fmt.json_schema.name,
         },
       };
+    } else if (fmt.type === "json_object") {
+      // Anthropic has no native json_object mode; inject a system hint
+      systemParts.push({
+        type: "text",
+        text: "Respond with valid JSON only. Do not include any text outside the JSON object.",
+      });
     }
   }
 
-  const messages: any[] = [];
-  const systemParts: any[] = [];
-
   for (const msg of body.messages || []) {
-    if (msg.role === "system") {
+    if (msg.role === "system" || msg.role === "developer") {
       const text =
         typeof msg.content === "string"
           ? msg.content
@@ -212,10 +219,14 @@ export function openaiToAnthropic(body: any): any {
     } else if (msg.role === "assistant" && msg.tool_calls) {
       const content: any[] = [];
       if (msg.content) {
-        content.push({
-          type: "text",
-          text: typeof msg.content === "string" ? msg.content : "",
-        });
+        const text =
+          typeof msg.content === "string"
+            ? msg.content
+            : msg.content
+                .filter((c: any) => c.type === "text")
+                .map((c: any) => c.text)
+                .join("");
+        if (text) content.push({ type: "text", text });
       }
       for (const tc of msg.tool_calls) {
         content.push({
@@ -309,6 +320,7 @@ export function anthropicToOpenai(anthropicResp: any, model: string): any {
         finish_reason: mapStopReason(anthropicResp.stop_reason),
       },
     ],
+    system_fingerprint: null,
     usage: formatChatUsage(
       inputTokens,
       outputTokens,
@@ -348,13 +360,13 @@ function makeChunk(
   delta: any,
   finishReason: string | null,
 ): string {
-  return JSON.stringify({
+  return `data: ${JSON.stringify({
     id: state.chatId,
     object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
     model: state.model,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
-  });
+  })}\n\n`;
 }
 
 type ChatSSEHandler = (
@@ -436,7 +448,7 @@ const chatSSEHandlers: Record<string, ChatSSEHandler> = {
     const chunks: string[] = [];
     if (state.includeUsage && usage) {
       chunks.push(
-        JSON.stringify({
+        `data: ${JSON.stringify({
           id: state.chatId,
           object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
@@ -447,10 +459,10 @@ const chatSSEHandlers: Record<string, ChatSSEHandler> = {
             usage.outputTokens,
             usage.cacheReadInputTokens,
           ),
-        }),
+        })}\n\n`,
       );
     }
-    chunks.push("[DONE]");
+    chunks.push("data: [DONE]\n\n");
     return chunks;
   },
 };
@@ -544,7 +556,7 @@ export function responsesToAnthropic(body: any): any {
     applyThinking(anthropicBody, effort, summary);
   }
 
-  // text.format → output_config
+  // text.format → output_config or system hint
   if (body.text?.format) {
     const fmt = body.text.format;
     if (fmt.type === "json_schema" && fmt.schema) {
@@ -555,6 +567,12 @@ export function responsesToAnthropic(body: any): any {
           name: fmt.name,
         },
       };
+    } else if (fmt.type === "json_object") {
+      if (!anthropicBody.system) anthropicBody.system = [];
+      anthropicBody.system.push({
+        type: "text",
+        text: "Respond with valid JSON only. Do not include any text outside the JSON object.",
+      });
     }
   }
 
@@ -593,9 +611,10 @@ export function responsesToAnthropic(body: any): any {
     const role = item.role;
 
     if (role === "system") {
-      if (!anthropicBody.system) {
-        const text = extractText(item.content);
-        if (text) anthropicBody.system = [{ type: "text", text }];
+      const text = extractText(item.content);
+      if (text) {
+        if (!anthropicBody.system) anthropicBody.system = [];
+        anthropicBody.system.push({ type: "text", text });
       }
       continue;
     }
