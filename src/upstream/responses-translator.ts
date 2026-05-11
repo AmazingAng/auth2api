@@ -310,7 +310,9 @@ export function anthropicToResponsesRequest(body: any): any {
   if (body.max_tokens !== undefined) out.max_output_tokens = body.max_tokens;
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (body.top_p !== undefined) out.top_p = body.top_p;
-  if (body.metadata?.user_id) out.user = body.metadata.user_id;
+  // NOTE: Do not forward `metadata.user_id` as `user`. The ChatGPT Codex
+  // backend (the only consumer of this translator) rejects requests that
+  // include `user` with HTTP 400 `{"detail":"Unsupported parameter: user"}`.
 
   // Anthropic `system` can be a string or [{type:"text", text}] array.
   if (body.system) {
