@@ -17,7 +17,7 @@ It is not trying to be a large multi-provider gateway. If you want a compact, un
 - **Lightweight by design** — small codebase, minimal moving parts
 - **Multiple providers, one proxy** — Claude OAuth, OpenAI Codex (ChatGPT) OAuth, and an experimental Cursor local-login provider coexist; per-provider account pools, cooldown, refresh, and stats
 - **Multi-account support** — load multiple OAuth tokens per provider with sticky routing, automatic failover, and per-account usage tracking
-- **OpenAI-compatible API** — supports `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
+- **OpenAI-compatible API** — supports `/v1/chat/completions`, `/v1/responses`, `/v1/images/generations`, `/v1/images/edits`, and `/v1/models`
 - **Claude native passthrough** — supports `/v1/messages` and `/v1/messages/count_tokens`
 - **Claude Code friendly** — works with both `Authorization: Bearer` and `x-api-key`
 - **Streaming, tools, images, and reasoning** — covers the main usage patterns without a large framework
@@ -205,12 +205,16 @@ When **more than one provider has accounts**, the historical routing table above
 | -------------------------------- | --------- | ------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `POST /v1/chat/completions`      | ✅        | ✅ (Chat ↔ Responses translator — reasoning as `reasoning_content`) | ✅ (`chat.completion.chunk` SSE; reasoning as `reasoning_content`) |
 | `POST /v1/responses`             | ✅        | ✅ (passthrough)                                                    | ✅                                                                 |
+| `POST /v1/images/generations`    | ❌        | ✅ (Codex Responses `image_generation` tool)                        | ❌                                                                 |
+| `POST /v1/images/edits`          | ❌        | ✅ (Codex Responses `image_generation` tool with input images)      | ❌                                                                 |
 | `POST /v1/messages`              | ✅        | ✅ (Anthropic ↔ Responses translator — see below)                   | ✅ (Anthropic Messages SSE — see below)                            |
 | `POST /v1/messages/count_tokens` | ✅        | ❌ (501)                                                            | ❌ (501)                                                           |
 
 For Cursor all three OpenAI-compatible endpoints are wired natively: `req.path` selects the wire format the cursor provider emits (`openai-chat-completions`, `openai-responses`, or `anthropic-messages`). Non-streaming `/v1/chat/completions` aggregates the upstream stream into a single `chat.completion` JSON response.
 
 For Codex (ChatGPT-account backend) the same coverage is achieved through a dedicated Chat ↔ Responses ↔ Anthropic translator pair (`src/upstream/responses-translator.ts`): incoming Chat or Anthropic requests are translated to OpenAI Responses upstream, the streaming Responses SSE response is translated back to the original wire format, and non-streaming requests aggregate the SSE locally before responding. Tool calls, system prompts (lifted into `instructions`), `reasoning_effort`/`thinking`, multi-turn conversations and `response_format` `json_schema` are all supported. Codex-specific incompatibilities (`max_output_tokens`, `parallel_tool_calls`) are stripped automatically in the codex handler — you don't have to think about them.
+
+Codex image routes (`/v1/images/generations`, `/v1/images/edits`) do not call the public OpenAI Images API and do not require a separate OpenAI API key. They route through the ChatGPT-account Codex Responses backend with the hosted `image_generation` tool (`gpt-image-2`) and return OpenAI-compatible `{ data: [{ b64_json }] }` responses. Codex may silently coerce `size` / `quality` to backend defaults, so exact dimensions are best-effort on this OAuth-backed path.
 
 #### Codex `/v1/responses` body requirements
 
@@ -234,6 +238,8 @@ The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.re
 | -------------------------------- | --------------------------------------------------------------------- |
 | `POST /v1/chat/completions`      | OpenAI-compatible chat                                                |
 | `POST /v1/responses`             | OpenAI Responses API compatibility                                    |
+| `POST /v1/images/generations`    | OpenAI-compatible image generation via Codex OAuth                    |
+| `POST /v1/images/edits`          | OpenAI-compatible image edit/reference generation via Codex OAuth     |
 | `POST /v1/messages`              | Claude native passthrough                                             |
 | `POST /v1/messages/count_tokens` | Claude token counting                                                 |
 | `GET /v1/models`                 | List available models                                                 |

@@ -184,6 +184,8 @@ async function startServer(): Promise<void> {
     console.log(`Endpoints:`);
     console.log(`  POST /v1/chat/completions`);
     console.log(`  POST /v1/responses`);
+    console.log(`  POST /v1/images/generations`);
+    console.log(`  POST /v1/images/edits`);
     console.log(`  POST /v1/messages`);
     console.log(`  POST /v1/messages/count_tokens`);
     console.log(`  GET  /v1/models`);

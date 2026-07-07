@@ -8,6 +8,10 @@ import {
   createResponsesHandler,
 } from "./handlers/openai";
 import {
+  createImageEditsHandler,
+  createImageGenerationsHandler,
+} from "./handlers/images";
+import {
   createMessagesHandler,
   createCountTokensHandler,
 } from "./handlers/anthropic";
@@ -281,6 +285,15 @@ export function createServer(
   app.post(
     "/backend-api/codex/responses/compact",
     createResponsesCompactHandler(config, registry),
+  );
+  app.post(
+    "/v1/images/generations",
+    createImageGenerationsHandler(config, registry),
+  );
+  app.post(
+    "/v1/images/edits",
+    express.raw({ type: "multipart/form-data", limit: config["body-limit"] }),
+    createImageEditsHandler(config, registry),
   );
 
   // Routes — Anthropic native passthrough
